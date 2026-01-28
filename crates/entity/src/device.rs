@@ -24,6 +24,12 @@ pub struct Model {
     pub refresh_token: String,
     pub twofactor_remember: Option<String>,
 
+    /// Current bearer token issued by `/identity/connect/token`.
+    pub access_token: Option<String>,
+
+    /// Unix timestamp (seconds) when `access_token` expires.
+    pub access_token_expires_at: Option<i64>,
+
     /// Unix timestamp (seconds).
     pub created_at: i64,
 

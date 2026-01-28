@@ -759,10 +759,14 @@ dependencies = [
  "entity",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
+ "hmac",
  "migration",
+ "pbkdf2",
  "sea-orm",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "worker",
 ]
 
@@ -3403,14 +3407,6 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
-
-[[package]]
-name = "macros"
-version = "0.1.0"
-dependencies = [
- "quote",
- "syn 2.0.114",
-]
 
 [[package]]
 name = "matchers"
@@ -7079,7 +7075,6 @@ dependencies = [
  "lettre",
  "libsqlite3-sys",
  "log",
- "macros",
  "mimalloc",
  "mini-moka",
  "num-derive",

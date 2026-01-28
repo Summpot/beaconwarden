@@ -6,7 +6,7 @@ repository = "https://github.com/dani-garcia/vaultwarden"
 publish = false
 
 [workspace]
-members = ["macros", "crates/*"]
+members = ["crates/*"]
 
 [package]
 name = "vaultwarden"
@@ -52,7 +52,6 @@ unstable = []
 syslog = "7.0.0"
 
 [dependencies]
-macros = { path = "./macros" }
 
 # Logging
 log = "0.4.29"

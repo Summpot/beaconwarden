@@ -28,8 +28,8 @@
 |---|---|---:|:---:|
 | 0 | Architecture decisions + repo scaffolding | Worker+Pages deploy pipeline green; health endpoint works | IP |
 | 1 | DB + migrations baseline | Migrator runs in Worker; schema versioning works | IP |
-| 2 | Auth primitives | Password hashing, sessions, device model, key derivation parity tests | NS |
-| 3 | Core Bitwarden API compatibility | Desktop/mobile/CLI can login + sync + CRUD ciphers | NS |
+| 2 | Auth primitives | Password hashing, sessions, device model, key derivation parity tests | IP |
+| 3 | Core Bitwarden API compatibility | Desktop/mobile/CLI can login + sync + CRUD ciphers | IP |
 | 4 | Orgs/collections/policies | Org sharing works; policies enforced | NS |
 | 5 | Attachments (R2 direct upload) | Upload/download/delete compatible; quotas | NS |
 | 6 | Sends | Create/send/delete works; optional | NS |
@@ -78,9 +78,9 @@
 
 | ID | Task | Depends on | Acceptance criteria | Status |
 |---:|---|---|---|:---:|
-| 3.1 | Implement `/identity/connect/token` (password grant) | 1.2 | Desktop/mobile can login | NS |
-| 3.2 | Implement refresh token flow | 3.1 | Refresh works across restarts | NS |
-| 3.3 | Implement device registration & push token ignore | 3.1 | Devices show in clients | NS |
+| 3.1 | Implement `/identity/connect/token` (password grant) | 1.2 | Desktop/mobile can login | DONE |
+| 3.2 | Implement refresh token flow | 3.1 | Refresh works across restarts | DONE |
+| 3.3 | Implement device registration & push token ignore | 3.1 | Devices show in clients | IP |
 | 3.4 | Implement 2FA baseline (TOTP) | 3.1 | TOTP login works | NS |
 | 3.5 | Disable/omit websocket notifications explicitly | 0.3 | Clients do not hang on notifications | DONE |
 
@@ -91,9 +91,9 @@
 | Module | Key endpoints | Notes | Status |
 |---|---|---|:---:|
 | `api/web` | `/`, `/app-id.json` | Optional static/web vault | NS |
-| `api/identity` | `/identity/*` | Critical | NS |
-| `api/core/accounts` | `/api/accounts/*` | Signup, profile, keys | NS |
-| `api/core/ciphers` | `/api/ciphers/*`, `/api/sync` | Critical | NS |
+| `api/identity` | `/identity/*` | Critical | IP |
+| `api/core/accounts` | `/api/accounts/*` | Signup, profile, keys | IP |
+| `api/core/ciphers` | `/api/ciphers/*`, `/api/sync` | Critical | IP |
 | `api/core/folders` | `/api/folders/*` |  | NS |
 | `api/core/organizations` | `/api/organizations/*` |  | NS |
 | `api/core/events` | `/api/events/*` | Optional; can be stubbed | NS |

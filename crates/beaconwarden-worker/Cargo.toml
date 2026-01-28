@@ -14,6 +14,10 @@ migration = { path = "../migration" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
+pbkdf2 = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 worker = "0.7"

@@ -2,6 +2,8 @@ use worker::*;
 
 #[path = "wasm/db/mod.rs"]
 pub mod db;
+#[path = "wasm/crypto.rs"]
+pub mod crypto;
 #[path = "wasm/env.rs"]
 pub mod env;
 #[path = "wasm/handlers/mod.rs"]
@@ -51,6 +53,20 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         });
         let resp = Response::from_json(&body)?;
         return json_with_cors(&req, resp);
+    }
+
+    // --- Bitwarden/Vaultwarden compatibility routes (minimum viable set) ---
+    if req.method() == Method::Post && path == "/api/accounts/prelogin" {
+        return handlers::accounts::handle_prelogin(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/register" {
+        return handlers::accounts::handle_register(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/identity/connect/token" {
+        return handlers::identity::handle_connect_token(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/sync" {
+        return handlers::sync::handle_sync(req, &env).await;
     }
 
     if req.method() == Method::Post && path == "/v1/admin/migrations/up" {
