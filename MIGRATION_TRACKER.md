@@ -47,8 +47,8 @@
 |---:|---|---|---|:---:|
 | 0.1 | Add `wrangler.workers.jsonc` (API Worker) |  | `wrangler deploy --config wrangler.workers.jsonc` works | IP |
 | 0.2 | Add `wrangler.jsonc` (Pages proxy) |  | Pages deploy works; requests proxy to Worker | IP |
-| 0.3 | Create `crates/beaconwarden-worker` (wasm runtime) | 0.1 | `/health` returns JSON 200 | IP |
-| 0.4 | Create `crates/entity` + `crates/migration` | 0.3 | Worker can run `Migrator::up` | IP |
+| 0.3 | Create `crates/beaconwarden-worker` (wasm runtime) | 0.1 | `/health` returns JSON 200 | DONE |
+| 0.4 | Create `crates/entity` + `crates/migration` | 0.3 | Worker can run `Migrator::up` | DONE |
 | 0.5 | Add `.github/workflows/deploy-cloudflare-worker.yml` | 0.1–0.4 | API deploy + migrations in CI | NS |
 | 0.6 | Add `.github/workflows/deploy-cloudflare-pages.yml` | 0.2 | Pages deploy in CI | NS |
 | 0.7 | Add `AGENTS.md` guidance for agents |  | Clear conventions + Do/Don’t list | IP |
@@ -71,8 +71,8 @@
 | ID | Task | Depends on | Acceptance criteria | Status |
 |---:|---|---|---|:---:|
 | 2.1 | Define routing map for Bitwarden endpoints | 0.3 | Document lists all routes | NS |
-| 2.2 | Implement common error format mapping | 0.3 | Clients understand failures (no generic 500) | NS |
-| 2.3 | Implement CORS + security headers parity | 0.3 | Web clients + extensions function | NS |
+| 2.2 | Implement common error format mapping | 0.3 | Clients understand failures (no generic 500) | IP |
+| 2.3 | Implement CORS + security headers parity | 0.3 | Web clients + extensions function | IP |
 
 ### 3. Identity & auth
 
@@ -82,7 +82,7 @@
 | 3.2 | Implement refresh token flow | 3.1 | Refresh works across restarts | NS |
 | 3.3 | Implement device registration & push token ignore | 3.1 | Devices show in clients | NS |
 | 3.4 | Implement 2FA baseline (TOTP) | 3.1 | TOTP login works | NS |
-| 3.5 | Disable/omit websocket notifications explicitly | 0.3 | Clients do not hang on notifications | NS |
+| 3.5 | Disable/omit websocket notifications explicitly | 0.3 | Clients do not hang on notifications | DONE |
 
 ### 4. Core API surface (Bitwarden)
 
@@ -101,8 +101,8 @@
 | `api/core/sends` | `/api/sends/*` | Optional but commonly used | NS |
 | `api/admin` | `/admin/*` | Replace with minimal ops endpoints | NS |
 | `api/icons` | `/icons/*` | Optional; may be simplified | NS |
-| `api/notifications` | `/notifications/*` | **Dropped** (no websockets) | NS |
-| `api/push` | `/push/*` | **Dropped** | NS |
+| `api/notifications` | `/notifications/*` | **Dropped** (no websockets) | DONE |
+| `api/push` | `/push/*` | **Dropped** | DONE |
 
 ### 5. Attachments via R2 (direct upload)
 

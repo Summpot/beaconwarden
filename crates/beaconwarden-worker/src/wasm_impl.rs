@@ -1,3 +1,8 @@
+//! NOTE: This file is currently not wired into the wasm32 Cloudflare Worker build.
+//!
+//! The active Worker entrypoint is `src/worker_wasm.rs` (re-exported from `lib.rs`).
+//! Keep changes there unless you intentionally rewire the crate structure.
+
 use worker::*;
 
 mod wasm;

@@ -25,6 +25,25 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?;
     let path = url.path();
 
+    // Non-goals by design: websocket notifications and push.
+    // Respond quickly with a stable error shape so clients don't hang.
+    if path.starts_with("/notifications") {
+        return http::error_response(
+            &req,
+            410,
+            "notifications_disabled",
+            "Notifications are disabled on this deployment",
+        );
+    }
+    if path.starts_with("/push") {
+        return http::error_response(
+            &req,
+            410,
+            "push_disabled",
+            "Push is disabled on this deployment",
+        );
+    }
+
     if req.method() == Method::Get && path == "/health" {
         let body = serde_json::json!({
             "ok": true,
@@ -36,6 +55,10 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     if req.method() == Method::Post && path == "/v1/admin/migrations/up" {
         return handlers::migrations::handle_migrations_up(&req, &env).await;
+    }
+
+    if req.method() == Method::Get && path == "/v1/admin/db/ping" {
+        return handlers::admin::handle_db_ping(&req, &env).await;
     }
 
     not_found(&req)

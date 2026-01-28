@@ -1,13 +1,11 @@
 use worker::{Env, Request, Response, Result};
 
-use migration::MigratorTrait;
-
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::http::{internal_error_response, json_with_cors};
 
 use super::admin_auth::ensure_admin_authorized;
 
-pub async fn handle_migrations_up(req: &Request, env: &Env) -> Result<Response> {
+pub async fn handle_db_ping(req: &Request, env: &Env) -> Result<Response> {
     if let Some(resp) = ensure_admin_authorized(req, env).await? {
         return Ok(resp);
     }
@@ -17,13 +15,14 @@ pub async fn handle_migrations_up(req: &Request, env: &Env) -> Result<Response> 
         Err(e) => return internal_error_response(req, "Failed to open libSQL connection", &e),
     };
 
-    if let Err(e) = migration::Migrator::up(&db, None).await {
-        return internal_error_response(req, "Failed to apply migrations", &e);
+    // A minimal query to validate the connection.
+    if let Err(e) = db.ping().await {
+        return internal_error_response(req, "libSQL ping failed", &e);
     }
 
     let resp = Response::from_json(&serde_json::json!({
         "success": true,
-        "migrations": { "applied": true }
+        "db": { "ok": true }
     }))?;
 
     json_with_cors(req, resp)

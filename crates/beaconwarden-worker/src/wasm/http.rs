@@ -7,28 +7,68 @@ fn cors_headers(req: &Request) -> Result<Headers> {
 
     // Reflect Origin when present; otherwise allow all.
     // Bitwarden clients typically do not rely on CORS, but web vault / browser extensions do.
-    let origin = req.headers().get("Origin")?.unwrap_or_else(|| "*".to_string());
+    let origin = req.headers().get("Origin")?;
 
-    headers.set("Access-Control-Allow-Origin", &origin)?;
-    headers.set("Vary", "Origin")?;
-    headers.set("Access-Control-Allow-Credentials", "true")?;
+    match origin.as_deref() {
+        Some(o) if !o.trim().is_empty() => {
+            headers.set("Access-Control-Allow-Origin", o)?;
+            // Needed when reflecting Origin.
+            headers.set("Access-Control-Allow-Credentials", "true")?;
+        }
+        _ => {
+            // Non-browser callers typically omit Origin; allow any.
+            headers.set("Access-Control-Allow-Origin", "*")?;
+        }
+    }
+
+    headers.set(
+        "Vary",
+        "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+    )?;
     headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")?;
     headers.set(
         "Access-Control-Allow-Headers",
-        "Authorization,Content-Type,Accept,X-Requested-With",
+        "Authorization,Content-Type,Accept,X-Requested-With,Device-Type,Device-Identifier,Device-Name,Bitwarden-Client-Name,Bitwarden-Client-Version",
     )?;
+    // Cache preflights for a day.
+    headers.set("Access-Control-Max-Age", "86400")?;
 
     Ok(headers)
 }
 
-pub fn json_with_cors(req: &Request, mut resp: Response) -> Result<Response> {
-    let headers = cors_headers(req)?;
+fn security_headers() -> Result<Headers> {
+    let headers = Headers::new();
+
+    // Conservative security headers for an API-only service.
+    headers.set("X-Content-Type-Options", "nosniff")?;
+    headers.set("X-Frame-Options", "DENY")?;
+    headers.set("Referrer-Policy", "no-referrer")?;
+
+    // Avoid caching API responses (important for auth and sync).
+    headers.set("Cache-Control", "no-store")?;
+    headers.set("Pragma", "no-cache")?;
+
+    Ok(headers)
+}
+
+fn apply_headers(req: &Request, mut resp: Response) -> Result<Response> {
+    let cors = cors_headers(req)?;
+    let sec = security_headers()?;
     let resp_headers = resp.headers_mut();
-    for (k, v) in headers.entries() {
+
+    for (k, v) in cors.entries() {
+        resp_headers.set(&k, &v)?;
+    }
+    for (k, v) in sec.entries() {
         resp_headers.set(&k, &v)?;
     }
 
     Ok(resp)
+}
+
+pub fn json_with_cors(req: &Request, resp: Response) -> Result<Response> {
+    // Backwards-compat name; now applies both CORS and common security headers.
+    apply_headers(req, resp)
 }
 
 pub fn error_response(req: &Request, status: u16, code: &str, message: &str) -> Result<Response> {
