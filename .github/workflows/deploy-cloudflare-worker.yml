@@ -60,7 +60,7 @@ jobs:
           import fs from 'node:fs';
 
           const org = String(process.env.TURSO_ORG_SLUG ?? '').trim();
-          const name = String(process.env.TURSO_DB_NAME ?? '').trim();
+          const name = String(process.env.TURSO_DB_NAME ?? 'beaconwarden').trim();
           const group = String(process.env.TURSO_GROUP ?? 'default').trim() || 'default';
           const token = String(process.env.TURSO_PLATFORM_API_TOKEN ?? '').trim();
 

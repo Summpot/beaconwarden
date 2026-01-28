@@ -121,7 +121,7 @@ jobs:
 
           echo "Ensuring Pages project '$project' exists (errors are safe to ignore):"
 
-          cmd=(wrangler pages project create "$project" --production-branch "main" --config "${WRANGLER_PAGES_CONFIG}")
+          cmd=(wrangler pages project create "$project" --production-branch "main")
           if [ -n "$compat" ]; then
             cmd+=(--compatibility-date "$compat")
           fi
@@ -141,6 +141,6 @@ jobs:
           project="${PAGES_PROJECT:?PAGES_PROJECT is required}"
           echo "Deploying Pages project '$project' from ./dist"
 
-          wrangler pages deploy dist --project-name "$project" --branch "main" --experimental-provision --experimental-auto-create --config "${WRANGLER_PAGES_CONFIG}"
+          wrangler pages deploy dist --project-name "$project" --branch "main" --experimental-provision --experimental-auto-create
 
           echo "Pages URL: https://$project.pages.dev" >> "$GITHUB_STEP_SUMMARY"
