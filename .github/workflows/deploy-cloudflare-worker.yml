@@ -30,23 +30,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        name: Install pnpm
-        with:
-          version: 10
-
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: '22'
-          cache: 'pnpm'
 
       - name: Install wrangler
-        run: pnpm install wrangler -g
+        run: npm install wrangler -g
 
       - name: Ensure Turso database exists (Platform API)
         id: turso
-        if: ${{ secrets.TURSO_PLATFORM_API_TOKEN != '' && secrets.TURSO_ORG_SLUG != '' && secrets.TURSO_DB_NAME != '' }}
         env:
           TURSO_PLATFORM_API_TOKEN: ${{ secrets['TURSO_PLATFORM_API_TOKEN'] }}
           TURSO_ORG_SLUG: ${{ secrets['TURSO_ORG_SLUG'] }}
