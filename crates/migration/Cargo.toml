@@ -1,0 +1,20 @@
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "migration"
+path = "src/lib.rs"
+
+[dependencies]
+entity = { path = "../entity" }
+
+# Keep default features off so this can link into Cloudflare Workers (wasm32).
+sea-orm-migration = { git = "https://github.com/Summpot/sea-orm.git", branch = "libsql", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native-only tooling (optional later)
+tokio = { version = "1.49", features = ["full"] }
+sea-orm = { git = "https://github.com/Summpot/sea-orm.git", branch = "libsql", default-features = false, features = ["libsql", "macros"] }

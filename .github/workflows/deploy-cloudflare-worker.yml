@@ -1,0 +1,337 @@
+name: Deploy (Cloudflare Worker)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - crates/beaconwarden-worker/**
+      - crates/migration/**
+      - crates/entity/**
+      - Cargo.toml
+      - Cargo.lock
+      - wrangler.workers.jsonc
+      - wrangler.jsonc
+      - .github/workflows/deploy-cloudflare-worker.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-worker-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-worker:
+    name: Deploy beaconwarden-worker (API)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        name: Install pnpm
+        with:
+          version: 10
+
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install wrangler
+        run: pnpm install wrangler -g
+
+      - name: Ensure Turso database exists (Platform API)
+        id: turso
+        env:
+          TURSO_PLATFORM_API_TOKEN: ${{ secrets['TURSO_PLATFORM_API_TOKEN'] }}
+          TURSO_ORG_SLUG: ${{ secrets['TURSO_ORG_SLUG'] }}
+          TURSO_DB_NAME: ${{ secrets['TURSO_DB_NAME'] }}
+          TURSO_GROUP: ${{ secrets['TURSO_GROUP'] }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const org = String(process.env.TURSO_ORG_SLUG ?? '').trim();
+          const name = String(process.env.TURSO_DB_NAME ?? '').trim();
+          const group = String(process.env.TURSO_GROUP ?? 'default').trim() || 'default';
+          const token = String(process.env.TURSO_PLATFORM_API_TOKEN ?? '').trim();
+
+          if (!org) throw new Error('Missing TURSO_ORG_SLUG');
+          if (!name) throw new Error('Missing TURSO_DB_NAME');
+          if (!token) throw new Error('Missing TURSO_PLATFORM_API_TOKEN');
+
+          async function api(path, init = {}) {
+            const res = await fetch(`https://api.turso.tech${path}`, {
+              ...init,
+              headers: {
+                Authorization: `Bearer ${token}`,
+                ...(init.headers ?? {}),
+              },
+            });
+            const text = await res.text();
+            const json = text ? JSON.parse(text) : null;
+            if (!res.ok) {
+              const err = new Error(`Turso API ${res.status} ${res.statusText} on ${path}`);
+              err.details = json;
+              throw err;
+            }
+            return json;
+          }
+
+          function normalizeGroupName(value) {
+            return String(value ?? '').trim();
+          }
+
+          // Ensure group exists (create if missing).
+          let groupExists = false;
+          const listGroups = await api(`/v1/organizations/${encodeURIComponent(org)}/groups`);
+          const groups = Array.isArray(listGroups?.groups)
+            ? listGroups.groups
+            : Array.isArray(listGroups?.Groups)
+              ? listGroups.Groups
+              : Array.isArray(listGroups)
+                ? listGroups
+                : [];
+
+          groupExists = groups.some((g) => {
+            const name = normalizeGroupName(g?.Name ?? g?.name ?? g?.slug ?? g?.Group ?? g?.group);
+            return name === group;
+          });
+
+          if (!groupExists) {
+            try {
+              await api(`/v1/organizations/${encodeURIComponent(org)}/groups`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: group }),
+              });
+            } catch (err) {
+              const status = String(err?.details?.error ?? '');
+              if (!String(err.message ?? '').includes('409') && !status.toLowerCase().includes('already')) {
+                throw err;
+              }
+            }
+          }
+
+          // Create DB if missing.
+          const list = await api(`/v1/organizations/${encodeURIComponent(org)}/databases`);
+          const databases = Array.isArray(list?.databases) ? list.databases : [];
+          const exists = databases.some((db) => String(db?.Name ?? '').trim() === name);
+
+          if (!exists) {
+            try {
+              await api(`/v1/organizations/${encodeURIComponent(org)}/databases`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, group }),
+              });
+            } catch (err) {
+              // Concurrent create can happen; allow it to proceed.
+              const status = String(err?.details?.error ?? '');
+              if (!String(err.message ?? '').includes('409') && !status.toLowerCase().includes('already')) {
+                throw err;
+              }
+            }
+          }
+
+          // Retrieve Hostname.
+          const db = await api(`/v1/organizations/${encodeURIComponent(org)}/databases/${encodeURIComponent(name)}`);
+          const hostname = String(db?.database?.Hostname ?? '').trim();
+          if (!hostname) throw new Error('Turso API: missing database.Hostname');
+          const databaseUrl = `libsql://${hostname}`;
+
+          // Create a database auth token.
+          const tok = await api(`/v1/organizations/${encodeURIComponent(org)}/databases/${encodeURIComponent(name)}/auth/tokens?authorization=full-access`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          const jwt = String(tok?.jwt ?? '').trim();
+          if (!jwt) throw new Error('Turso API: missing jwt');
+
+          console.log(`::add-mask::${jwt}`);
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            [`turso_database_url=${databaseUrl}`, `turso_auth_token=${jwt}`, ''].join('\n'),
+          );
+
+          console.log(`Turso database ensured: ${name} (${databaseUrl})`);
+          NODE
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install worker-build
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: worker-build
+
+      - name: Setup sccache
+        uses: Summpot/sccache-action@main
+        with:
+          disable_annotations: true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run worker-build
+        run: worker-build --release crates/beaconwarden-worker
+
+      - name: Resolve deploy settings
+        id: cfg
+        env:
+          BASE_URL: ${{ secrets.CLOUDFLARE_WORKER_BASE_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          LIBSQL_URL: ${{ steps.turso.outputs.turso_database_url || secrets.CLOUDFLARE_WORKER_LIBSQL_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function readJson(path) {
+            return JSON.parse(fs.readFileSync(path, 'utf8'));
+          }
+
+          const pagesCfgPath = 'wrangler.jsonc';
+          const workersCfgPath = 'wrangler.workers.jsonc';
+
+          const pagesCfg = readJson(pagesCfgPath);
+          const workersCfg = readJson(workersCfgPath);
+
+          const pagesName = String(pagesCfg?.name ?? '').trim();
+          const workersName = String(workersCfg?.name ?? '').trim();
+          if (!pagesName) {
+            throw new Error('Could not resolve Pages project name from wrangler.jsonc (expected: { "name": "..." })');
+          }
+          if (!workersName) {
+            throw new Error('Could not resolve Worker name from wrangler.workers.jsonc (expected: { "name": "..." })');
+          }
+          if (pagesName !== workersName) {
+            throw new Error(`Config mismatch: wrangler.jsonc name="${pagesName}" but wrangler.workers.jsonc name="${workersName}". They must match.`);
+          }
+
+          const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID ?? '').trim();
+          if (!accountId) {
+            throw new Error('Missing CLOUDFLARE_ACCOUNT_ID (required for Wrangler in CI).');
+          }
+
+          // Generate CI-only configs that pin account_id so Wrangler does not need to call
+          // the /memberships endpoint to infer it.
+          workersCfg.account_id = accountId;
+
+          const ciWorkersConfigPath = 'wrangler.workers.ci.json';
+          fs.writeFileSync(ciWorkersConfigPath, JSON.stringify(workersCfg, null, 2) + '\n');
+
+          const pagesBaseUrl = `https://${pagesName}.pages.dev`;
+          const baseUrlFromEnv = String(process.env.BASE_URL ?? '').trim();
+          const resolvedBaseUrl = baseUrlFromEnv || pagesBaseUrl;
+
+          const libsqlUrl = String(process.env.LIBSQL_URL ?? '').trim();
+          if (!libsqlUrl) {
+            throw new Error('Missing LIBSQL_URL (set CLOUDFLARE_WORKER_LIBSQL_URL).');
+          }
+
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            [
+              `worker_name=${pagesName}`,
+              `pages_base_url=${pagesBaseUrl}`,
+              `resolved_base_url=${resolvedBaseUrl}`,
+              `libsql_url=${libsqlUrl}`,
+              `wrangler_workers_config=${ciWorkersConfigPath}`,
+              '',
+            ].join('\n'),
+          );
+
+          console.log(`Project name: ${pagesName}`);
+          console.log(`BASE_URL: ${resolvedBaseUrl}`);
+          console.log(`LIBSQL_URL: ${libsqlUrl}`);
+          console.log(`Wrangler Worker config: ${ciWorkersConfigPath}`);
+          NODE
+
+      - name: Deploy worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BASE_URL: ${{ steps.cfg.outputs.resolved_base_url }}
+          LIBSQL_URL: ${{ steps.cfg.outputs.libsql_url }}
+          LIBSQL_AUTH_TOKEN: ${{ steps.turso.outputs.turso_auth_token || secrets.CLOUDFLARE_WORKER_LIBSQL_AUTH_TOKEN }}
+          WRANGLER_WORKERS_CONFIG: ${{ steps.cfg.outputs.wrangler_workers_config }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wrangler deploy --config "${WRANGLER_WORKERS_CONFIG}" \
+            --var "BASE_URL:${BASE_URL}" \
+            --var "LIBSQL_URL:${LIBSQL_URL}" \
+            --var "LIBSQL_AUTH_TOKEN:${LIBSQL_AUTH_TOKEN}" \
+            --var "CLOUDFLARE_ACCOUNT_ID:${CLOUDFLARE_ACCOUNT_ID}"
+
+      - name: Apply SeaORM migrations (Migrator::up)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_MIGRATIONS_API_TOKEN: ${{ secrets.CLOUDFLARE_MIGRATIONS_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_NAME: ${{ steps.cfg.outputs.worker_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          worker="${WORKER_NAME:?WORKER_NAME is required}"
+
+          # Some Cloudflare API tokens are IP-restricted to CI runners. The migration endpoint
+          # verifies tokens from within the Worker runtime, so you may need a separate token
+          # without restrictive IP policies.
+          token="${CLOUDFLARE_MIGRATIONS_API_TOKEN:-${CLOUDFLARE_API_TOKEN}}"
+          if [ -z "$token" ]; then
+            echo "Missing CLOUDFLARE_API_TOKEN (or CLOUDFLARE_MIGRATIONS_API_TOKEN)." >&2
+            exit 1
+          fi
+
+          echo "Resolving workers.dev subdomain for account ${CLOUDFLARE_ACCOUNT_ID}..."
+          subdomain=$(curl -sS \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            | jq -r '.result.subdomain // empty')
+
+          if [ -z "$subdomain" ]; then
+            echo "Failed to resolve workers.dev subdomain." >&2
+            curl -sS \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+              | jq -c '{success, errors, messages}' >&2 || true
+            exit 1
+          fi
+
+          url="https://${worker}.${subdomain}.workers.dev/v1/admin/migrations/up"
+          echo "Calling migration endpoint: $url"
+
+          curl -sS --fail-with-body \
+            -X POST "$url" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            --data '{}' \
+            | jq -C .
+
+          echo "Applied migrations via Migrator::up" >> "$GITHUB_STEP_SUMMARY"

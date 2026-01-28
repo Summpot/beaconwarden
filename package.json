@@ -1,0 +1,15 @@
+{
+  "name": "beaconwarden",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pages:deploy": "wrangler pages deploy dist --project-name beaconwarden --branch main --experimental-provision --experimental-auto-create",
+    "worker:deploy": "wrangler deploy --config wrangler.workers.jsonc",
+    "worker:dev": "wrangler dev --config wrangler.workers.jsonc",
+    "pages:dev": "wrangler pages dev dist --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "wrangler": "^4.59.2"
+  }
+}

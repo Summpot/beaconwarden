@@ -1,0 +1,14 @@
+# Wrangler local development variables (example)
+# Copy to .dev.vars and fill values.
+
+LIBSQL_URL=
+BASE_URL=http://127.0.0.1:8787
+
+# Secrets are not supported in .dev.vars. For local dev, you can temporarily add them here
+# or use `wrangler secret put`.
+LIBSQL_AUTH_TOKEN=
+
+# R2 direct-upload presign credentials (S3-compatible)
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=

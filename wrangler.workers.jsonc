@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "beaconwarden",
+  "compatibility_date": "2026-01-28",
+  "main": "crates/beaconwarden-worker/build/worker/shim.mjs",
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    }
+  },
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm", "**/*.wasm?module"],
+      "fallthrough": false
+    }
+  ],
+  "vars": {
+    "LIBSQL_URL": "",
+    "BASE_URL": "https://beaconwarden.pages.dev"
+  },
+  "r2_buckets": [
+    {
+      "binding": "ATTACHMENTS",
+      "bucket_name": "beaconwarden-attachments",
+      "preview_bucket_name": "beaconwarden-attachments-dev"
+    }
+  ]
+}

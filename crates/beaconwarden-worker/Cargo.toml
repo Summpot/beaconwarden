@@ -1,0 +1,30 @@
+[package]
+name = "beaconwarden-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+entity = { path = "../entity" }
+migration = { path = "../migration" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "0.7"
+console_error_panic_hook = "0.1"
+
+# Summpot SeaORM fork with libsql support.
+sea-orm = { git = "https://github.com/Summpot/sea-orm.git", branch = "libsql", default-features = false, features = ["libsql", "macros"] }
+
+# Help rand/getrandom work reliably on wasm.
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Keep non-wasm builds light; this crate is intended for wasm32.
