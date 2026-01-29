@@ -4,6 +4,7 @@ mod m20260128_000001_init;
 mod m20260128_000002_core_tables;
 mod m20260128_000003_auth_fields;
 mod m20260129_000004_register_verifications;
+mod m20260129_000005_fix_users_akey_column;
 
 pub struct Migrator;
 
@@ -16,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260128_000002_core_tables::Migration),
             Box::new(m20260128_000003_auth_fields::Migration),
             Box::new(m20260129_000004_register_verifications::Migration),
+            Box::new(m20260129_000005_fix_users_akey_column::Migration),
         ]
     }
 }

@@ -1,13 +1,43 @@
+use std::collections::HashMap;
+
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::Value;
 use worker::{Env, Request, Response, Result, Url};
 
 use crate::worker_wasm::db::db_connect;
-use crate::worker_wasm::handlers::admin_auth::extract_bearer_token;
-use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
-use crate::worker_wasm::util::now_ts;
+use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
+use crate::worker_wasm::http::{internal_error_response, json_with_cors};
+use crate::worker_wasm::util::ts_to_rfc3339;
 
-use entity::{device, user};
+use entity::{cipher, folder, folder_cipher, user};
+
+fn folder_json(f: &folder::Model) -> Value {
+    serde_json::json!({
+        "id": f.id,
+        "name": f.name,
+        "revisionDate": ts_to_rfc3339(f.updated_at),
+        "object": "folder",
+    })
+}
+
+fn cipher_json(c: &cipher::Model, folder_id: Option<String>) -> Value {
+    let mut obj: Value = serde_json::from_str(&c.data).unwrap_or_else(|_| serde_json::json!({}));
+
+    obj["id"] = Value::String(c.id.clone());
+    obj["revisionDate"] = Value::String(ts_to_rfc3339(c.updated_at));
+    obj["creationDate"] = Value::String(ts_to_rfc3339(c.created_at));
+    obj["deletedDate"] = match c.deleted_at {
+        Some(ts) => Value::String(ts_to_rfc3339(ts)),
+        None => Value::Null,
+    };
+    obj["folderId"] = folder_id.map(Value::String).unwrap_or(Value::Null);
+
+    if obj.get("object").and_then(|v| v.as_str()).is_none() {
+        obj["object"] = Value::String("cipher".to_string());
+    }
+
+    obj
+}
 
 fn profile_json(u: &user::Model) -> Value {
     let status = if u.password_hash.as_ref().is_some_and(|v| !v.is_empty()) { 0 } else { 1 };
@@ -67,49 +97,55 @@ pub async fn handle_sync(req: Request, env: &Env) -> Result<Response> {
         Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
     };
 
-    let Some(token) = extract_bearer_token(&req)? else {
-        return error_response(&req, 401, "unauthorized", "Missing bearer token");
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
     };
-
-    let now = now_ts();
-    let Some(dev) = device::Entity::find()
-        .filter(device::Column::AccessToken.eq(&token))
-        .one(&db)
-        .await
-        .map_err(|e| worker::Error::RustError(e.to_string()))?
-    else {
-        return error_response(&req, 401, "unauthorized", "Invalid token");
-    };
-
-    if let Some(exp) = dev.access_token_expires_at {
-        if exp <= now {
-            return error_response(&req, 401, "unauthorized", "Token expired");
-        }
-    }
-
-    let Some(u) = user::Entity::find_by_id(dev.user_id.clone())
-        .one(&db)
-        .await
-        .map_err(|e| worker::Error::RustError(e.to_string()))?
-    else {
-        return error_response(&req, 401, "unauthorized", "Invalid token");
-    };
-
-    if !u.enabled {
-        return error_response(&req, 403, "forbidden", "User disabled");
-    }
+    let u = auth.user;
 
     let url = req.url()?;
     let exclude_domains = parse_exclude_domains(&url);
 
     let domains_json = if exclude_domains { Value::Null } else { Value::Null };
 
+    let folders = folder::Entity::find()
+        .filter(folder::Column::UserId.eq(u.id.clone()))
+        .all(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let ciphers = cipher::Entity::find()
+        .filter(cipher::Column::UserId.eq(u.id.clone()))
+        .all(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let cipher_ids: Vec<String> = ciphers.iter().map(|c| c.id.clone()).collect();
+    let folder_map: HashMap<String, String> = if cipher_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let mappings = folder_cipher::Entity::find()
+            .filter(folder_cipher::Column::CipherId.is_in(cipher_ids))
+            .all(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        let mut map = HashMap::new();
+        for m in mappings {
+            map.entry(m.cipher_id).or_insert(m.folder_id);
+        }
+        map
+    };
+
     let resp = Response::from_json(&serde_json::json!({
         "profile": profile_json(&u),
-        "folders": [],
+        "folders": folders.iter().map(folder_json).collect::<Vec<_>>(),
         "collections": [],
         "policies": [],
-        "ciphers": [],
+        "ciphers": ciphers
+            .iter()
+            .map(|c| cipher_json(c, folder_map.get(&c.id).cloned()))
+            .collect::<Vec<_>>(),
         "domains": domains_json,
         "sends": [],
         "userDecryption": {

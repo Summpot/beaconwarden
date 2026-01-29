@@ -190,3 +190,4 @@ This table lists what the **Cloudflare Worker** currently serves.
 	- `POST /identity/accounts/register/finish`
 	- Added `register_verifications` table (SeaORM migration + entity) to store opaque signup tokens.
 	- Added Brevo HTTP API integration for transactional emails.
+- 2026-01-29: Fixed libSQL schema mismatch by renaming `users.a_key` to `users.akey` via additive migration (prevents "no such column: users.akey" errors).

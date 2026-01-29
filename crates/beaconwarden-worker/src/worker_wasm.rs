@@ -15,7 +15,7 @@ pub mod http;
 #[path = "wasm/util.rs"]
 pub mod util;
 
-use http::{json_with_cors, not_found};
+use http::{internal_error_response, json_with_cors, not_found};
 
 #[event(fetch)]
 pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -58,6 +58,33 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 
     // --- Bitwarden/Vaultwarden compatibility routes (minimum viable set) ---
+    if req.method() == Method::Get && path == "/api/now" {
+        let resp = Response::from_json(&util::ts_to_rfc3339(util::now_ts()))?;
+        return json_with_cors(&req, resp);
+    }
+    if req.method() == Method::Get && path == "/api/version" {
+        let version = "2025.12.0";
+        let resp = Response::from_json(&version)?;
+        return json_with_cors(&req, resp);
+    }
+    if req.method() == Method::Get && path == "/api/alive" {
+        // Keep compatibility with Vaultwarden: also validate DB connectivity.
+        if let Err(e) = db::db_connect(&env).await {
+            return internal_error_response(&req, "Failed to open libSQL connection", &e);
+        }
+        let resp = Response::from_json(&util::ts_to_rfc3339(util::now_ts()))?;
+        return json_with_cors(&req, resp);
+    }
+    if req.method() == Method::Get && path == "/api/webauthn" {
+        // Vaultwarden returns an empty list to prevent key-rotation issues.
+        let resp = Response::from_json(&serde_json::json!({
+            "object": "list",
+            "data": [],
+            "continuationToken": null,
+        }))?;
+        return json_with_cors(&req, resp);
+    }
+
     if req.method() == Method::Post && path == "/api/accounts/prelogin" {
         return handlers::accounts::handle_prelogin(req, &env).await;
     }
@@ -69,6 +96,26 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     if req.method() == Method::Post && path == "/identity/connect/token" {
         return handlers::identity::handle_connect_token(req, &env).await;
+    }
+
+    // Folders.
+    if path == "/api/folders" {
+        return handlers::folders::handle_folders(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/folders/") {
+        let (folder_id, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let tail = if tail.is_empty() { None } else { Some(tail) };
+        return handlers::folders::handle_folder(req, &env, folder_id.to_string(), tail).await;
+    }
+
+    // Ciphers.
+    if path == "/api/ciphers" || path == "/api/ciphers/create" {
+        return handlers::ciphers::handle_ciphers(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/ciphers/") {
+        let (cipher_id, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let tail = if tail.is_empty() { None } else { Some(tail) };
+        return handlers::ciphers::handle_cipher(req, &env, cipher_id.to_string(), tail).await;
     }
 
     // Identity registration flow (used by newer Bitwarden clients).
