@@ -474,14 +474,23 @@ async fn password_grant(
     let client_id = form_get_string(form, "client_id").unwrap_or_default();
     let scope = form_get_string(form, "scope").unwrap_or_else(|| "api offline_access".to_string());
 
+    // Bitwarden clients are not consistent about field casing.
+    // Desktop/mobile apps commonly send camelCase (deviceIdentifier/deviceName/deviceType).
+    // Vaultwarden accepts multiple aliases; mirror that behavior.
     let device_identifier = form_get_string(form, "device_identifier")
         .or_else(|| form_get_string(form, "deviceidentifier"))
+        .or_else(|| form_get_string(form, "deviceIdentifier"))
+        .or_else(|| form_get_string(form, "DeviceIdentifier"))
         .unwrap_or_default();
     let device_name = form_get_string(form, "device_name")
         .or_else(|| form_get_string(form, "devicename"))
+        .or_else(|| form_get_string(form, "deviceName"))
+        .or_else(|| form_get_string(form, "DeviceName"))
         .unwrap_or_else(|| "Unknown".to_string());
     let device_type_str = form_get_string(form, "device_type")
         .or_else(|| form_get_string(form, "devicetype"))
+        .or_else(|| form_get_string(form, "deviceType"))
+        .or_else(|| form_get_string(form, "DeviceType"))
         .unwrap_or_default();
 
     if username.is_empty() || password.is_empty() || client_id.is_empty() || device_identifier.is_empty() {
@@ -583,6 +592,8 @@ async fn refresh_grant(
 ) -> Result<Response> {
     let refresh_token = form_get_string(form, "refresh_token")
         .or_else(|| form_get_string(form, "refreshtoken"))
+        .or_else(|| form_get_string(form, "refreshToken"))
+        .or_else(|| form_get_string(form, "RefreshToken"))
         .unwrap_or_default();
 
     if refresh_token.is_empty() {

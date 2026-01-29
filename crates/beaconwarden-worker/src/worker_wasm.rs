@@ -90,6 +90,9 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Post && path == "/api/accounts/prelogin" {
         return handlers::accounts::handle_prelogin(req, &env).await;
     }
+    if req.method() == Method::Post && path == "/api/accounts/password-hint" {
+        return handlers::accounts::handle_password_hint(req, &env).await;
+    }
     if req.method() == Method::Post && path == "/api/accounts/register" {
         return handlers::accounts::handle_register(req, &env).await;
     }
