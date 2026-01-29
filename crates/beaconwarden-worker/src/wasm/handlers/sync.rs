@@ -7,7 +7,7 @@ use worker::{Env, Request, Response, Result, Url};
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{internal_error_response, json_with_cors};
-use crate::worker_wasm::util::ts_to_rfc3339;
+use crate::worker_wasm::util::{normalize_user_id_for_client, ts_to_rfc3339};
 
 use entity::{cipher, folder, folder_cipher, user};
 
@@ -43,7 +43,7 @@ fn profile_json(u: &user::Model) -> Value {
     let status = if u.password_hash.as_ref().is_some_and(|v| !v.is_empty()) { 0 } else { 1 };
     serde_json::json!({
         "_status": status,
-        "id": u.id,
+        "id": normalize_user_id_for_client(&u.id),
         "name": u.name.clone().unwrap_or_else(|| u.email.clone()),
         "email": u.email,
         "emailVerified": true,
@@ -52,7 +52,7 @@ fn profile_json(u: &user::Model) -> Value {
         "culture": "en-US",
         "twoFactorEnabled": false,
         "key": u.akey,
-        "privateKey": u.private_key,
+        "privateKey": u.private_key.clone().unwrap_or_default(),
         "securityStamp": u.security_stamp,
         "organizations": [],
         "providers": [],

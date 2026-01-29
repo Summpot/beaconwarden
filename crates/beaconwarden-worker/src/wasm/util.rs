@@ -67,3 +67,48 @@ pub fn uuid_v4() -> String {
 
     out
 }
+
+pub fn is_uuid_like(s: &str) -> bool {
+    // Fast, dependency-free UUID shape check.
+    // Accepts any UUID variant/version as long as it is 36 chars with dashes.
+    let s = s.trim();
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+        return false;
+    }
+
+    s.chars().enumerate().all(|(i, c)| {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            c == '-'
+        } else {
+            c.is_ascii_hexdigit()
+        }
+    })
+}
+
+pub fn normalize_user_id_for_client(id: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return String::new();
+    }
+    if is_uuid_like(id) {
+        return id.to_string();
+    }
+
+    // If the id is a 32-hex string (legacy), format it as a UUID string.
+    if id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return format!(
+            "{}-{}-{}-{}-{}",
+            &id[0..8],
+            &id[8..12],
+            &id[12..16],
+            &id[16..20],
+            &id[20..32]
+        );
+    }
+
+    id.to_string()
+}

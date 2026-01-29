@@ -191,3 +191,5 @@ This table lists what the **Cloudflare Worker** currently serves.
 	- Added `register_verifications` table (SeaORM migration + entity) to store opaque signup tokens.
 	- Added Brevo HTTP API integration for transactional emails.
 - 2026-01-29: Fixed libSQL schema mismatch by renaming `users.a_key` to `users.akey` via additive migration (prevents "no such column: users.akey" errors).
+- 2026-01-29: Added `server_secrets` table to persist server-level secrets (e.g., JWT signing secret) in libSQL so Cloudflare Workers can remain stateless without requiring `JWT_SECRET`.
+- 2026-01-29: Switched newly-created `users.id` values to UUIDv4 format (Bitwarden/Vaultwarden-compatible; avoids clients rejecting the user id).

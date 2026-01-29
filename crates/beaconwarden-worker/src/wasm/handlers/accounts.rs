@@ -9,7 +9,7 @@ use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::env::env_string;
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
-use crate::worker_wasm::util::{generate_security_stamp, now_ts, random_bytes};
+use crate::worker_wasm::util::{generate_security_stamp, now_ts, random_bytes, uuid_v4};
 use crate::worker_wasm::{brevo};
 
 use entity::{user, user::Entity as UserEntity};
@@ -335,7 +335,7 @@ pub(crate) async fn register_with_db(
             return internal_error_response(req, "Failed to save user", &e);
         }
     } else {
-        let id = crate::worker_wasm::util::hex_encode(&random_bytes(16));
+        let id = uuid_v4();
         let active: user::ActiveModel = user::ActiveModel {
             id: Set(id),
             email: Set(email.clone()),

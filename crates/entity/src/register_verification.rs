@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 
 /// Register verification tokens used by the `/identity/accounts/register/*` flow.
 ///
-/// We store tokens in libSQL instead of relying on JWTs to keep the Worker implementation
-/// small (no extra base64/jwt dependencies) and to avoid requiring a globally shared secret.
+/// Vaultwarden uses a JWT for this flow. BeaconWarden prefers the JWT path as well, but keeps
+/// a DB-backed opaque token table as a compatibility fallback (e.g., if the JWT secret is not
+/// available yet or tokens were issued by an older deployment).
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "register_verifications")]
 pub struct Model {

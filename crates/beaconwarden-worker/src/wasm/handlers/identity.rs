@@ -10,10 +10,10 @@ use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::jwt;
-use crate::worker_wasm::util::{generate_refresh_token, now_ts, random_bytes};
+use crate::worker_wasm::util::{generate_refresh_token, normalize_user_id_for_client, now_ts, random_bytes};
 use crate::worker_wasm::{brevo, env::env_string};
 
-use entity::{device, user};
+use entity::{device, server_secret, user};
 use entity::{register_verification, register_verification::Entity as RegisterVerificationEntity};
 
 use super::accounts;
@@ -54,10 +54,13 @@ fn master_password_unlock_json(u: &user::Model, has_master_password: bool) -> Va
 }
 
 fn account_keys_json(u: &user::Model) -> Value {
+    let private_key = u.private_key.clone().unwrap_or_default();
+    let public_key = u.public_key.clone().unwrap_or_default();
+
     serde_json::json!({
         "publicKeyEncryptionKeyPair": {
-            "wrappedPrivateKey": u.private_key,
-            "publicKey": u.public_key,
+            "wrappedPrivateKey": private_key,
+            "publicKey": public_key,
             "Object": "publicKeyEncryptionKeyPair"
         },
         "Object": "privateKeys"
@@ -66,13 +69,14 @@ fn account_keys_json(u: &user::Model) -> Value {
 
 fn token_response_json(u: &user::Model, access_token: &str, refresh_token: &str, scope: &str, expires_in: i64) -> Value {
     let has_master_password = u.password_hash.as_ref().is_some_and(|v| !v.is_empty());
+    let private_key = u.private_key.clone().unwrap_or_default();
 
     let mut result = serde_json::json!({
         "access_token": access_token,
         "expires_in": expires_in,
         "token_type": "Bearer",
         "refresh_token": refresh_token,
-        "PrivateKey": u.private_key,
+        "PrivateKey": private_key,
 
         "Kdf": u.client_kdf_type,
         "KdfIterations": u.client_kdf_iter,
@@ -142,6 +146,59 @@ fn login_jwt_secret(env: &Env) -> Option<Vec<u8>> {
     env_string(env, "JWT_SECRET")
         .map(|s| s.trim().as_bytes().to_vec())
         .filter(|b| !b.is_empty())
+}
+
+async fn server_secret_get_or_create(
+    db: &sea_orm::DatabaseConnection,
+    name: &str,
+) -> std::result::Result<String, sea_orm::DbErr> {
+    // Read first.
+    if let Some(rec) = server_secret::Entity::find_by_id(name.to_string()).one(db).await? {
+        return Ok(rec.value);
+    }
+
+    // Create (best-effort). Keep the stored value ASCII so it can also be inspected/rotated manually.
+    let value = crate::worker_wasm::util::hex_encode(&random_bytes(64));
+    let now = now_ts();
+
+    let active = server_secret::ActiveModel {
+        name: Set(name.to_string()),
+        value: Set(value.clone()),
+        created_at: Set(now),
+    };
+
+    match active.insert(db).await {
+        Ok(_) => Ok(value),
+        Err(_) => {
+            // Another request likely created it; fetch again.
+            if let Some(rec) = server_secret::Entity::find_by_id(name.to_string()).one(db).await? {
+                Ok(rec.value)
+            } else {
+                Ok(value)
+            }
+        }
+    }
+}
+
+async fn login_jwt_secret_or_db(
+    env: &Env,
+    db: &sea_orm::DatabaseConnection,
+) -> Option<Vec<u8>> {
+    if let Some(secret) = login_jwt_secret(env) {
+        return Some(secret);
+    }
+
+    match server_secret_get_or_create(db, "jwt_secret").await {
+        Ok(v) if !v.trim().is_empty() => Some(v.into_bytes()),
+        Ok(_) => None,
+        Err(e) => {
+            // Keep login working even if migrations haven't been applied yet.
+            worker::console_log!(
+                "Failed to read/create server_secrets.jwt_secret; falling back to opaque JWT: {e}"
+            );
+            None
+        }
+    }
 }
 
 fn scope_to_vec(scope: &str) -> Vec<String> {
@@ -218,6 +275,7 @@ fn issue_login_access_token(
     scope: &str,
     expires_in: i64,
     now: i64,
+    jwt_secret: Option<&[u8]>,
 ) -> Result<String> {
     let name = u
         .name
@@ -229,7 +287,7 @@ fn issue_login_access_token(
         nbf: now,
         exp: now + expires_in,
         iss: login_issuer(req, env)?,
-        sub: u.id.clone(),
+        sub: normalize_user_id_for_client(&u.id),
         premium: true,
         name,
         email: u.email.clone(),
@@ -244,8 +302,8 @@ fn issue_login_access_token(
         amr: vec!["Application".to_string()],
     };
 
-    if let Some(secret) = login_jwt_secret(env) {
-        jwt::encode_hs256(&secret, &claims)
+    if let Some(secret) = jwt_secret {
+        jwt::encode_hs256(secret, &claims)
             .map_err(|e| worker::Error::RustError(format!("Failed to encode login JWT: {e}")))
     } else {
         encode_opaque_jwt(&claims)
@@ -360,6 +418,26 @@ fn register_verify_jwt_secret(env: &Env) -> Option<Vec<u8>> {
         .filter(|b| !b.is_empty())
 }
 
+async fn register_verify_jwt_secret_or_db(
+    env: &Env,
+    db: &sea_orm::DatabaseConnection,
+) -> Option<Vec<u8>> {
+    if let Some(secret) = register_verify_jwt_secret(env) {
+        return Some(secret);
+    }
+
+    match server_secret_get_or_create(db, "jwt_secret").await {
+        Ok(v) if !v.trim().is_empty() => Some(v.into_bytes()),
+        Ok(_) => None,
+        Err(e) => {
+            worker::console_log!(
+                "Failed to read/create server_secrets.jwt_secret for register verification; falling back to DB token: {e}"
+            );
+            None
+        }
+    }
+}
+
 async fn enumeration_delay() {
     // Approximate Vaultwarden's mitigation (1s +/- 100ms) to reduce timing side-channels.
     // Best-effort: if Delay is unavailable in the runtime, we simply skip the delay.
@@ -406,7 +484,7 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
     }
 
     let should_send_mail = brevo::brevo_is_configured(env) && parse_bool_env(env, "SIGNUPS_VERIFY");
-    let jwt_secret = register_verify_jwt_secret(env);
+    let jwt_secret = register_verify_jwt_secret_or_db(env, &db).await;
 
     // If we're going to send mail, don't send it to already-registered accounts.
     if should_send_mail {
@@ -525,7 +603,7 @@ pub async fn handle_register_finish(mut req: Request, env: &Env) -> Result<Respo
     let now = now_ts();
     let mut name_override: Option<String> = None;
 
-    if let Some(secret) = register_verify_jwt_secret(env) {
+    if let Some(secret) = register_verify_jwt_secret_or_db(env, &db).await {
         match jwt::decode_hs256::<RegisterVerifyClaims>(&secret, &token) {
             Ok(claims) => {
                 let expected_iss = register_verify_issuer(&req, env)?;
@@ -676,6 +754,8 @@ async fn password_grant(
     let device_type = device_type_str.parse::<i32>().unwrap_or(14);
     let now = now_ts();
 
+    let jwt_secret = login_jwt_secret_or_db(env, db).await;
+
     // Find or create device.
     let existing_device = device::Entity::find_by_id(device_identifier.clone())
         .one(db)
@@ -726,6 +806,7 @@ async fn password_grant(
         &scope,
         expires_in,
         now,
+        jwt_secret.as_deref(),
     )?;
     dev_active.access_token = Set(Some(access_token.clone()));
     dev_active.access_token_expires_at = Set(Some(now + expires_in));
@@ -786,6 +867,8 @@ async fn refresh_grant(
     let now = now_ts();
     let expires_in: i64 = 3600;
 
+    let jwt_secret = login_jwt_secret_or_db(env, db).await;
+
     let new_refresh_token = generate_refresh_token();
     // Scope is not included in refresh requests by some clients. Keep the canonical one.
     let scope = form_get_string(form, "scope").unwrap_or_else(|| "api offline_access".to_string());
@@ -800,6 +883,7 @@ async fn refresh_grant(
         &scope,
         expires_in,
         now,
+        jwt_secret.as_deref(),
     )?;
 
     let mut active: device::ActiveModel = dev.into();
