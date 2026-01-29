@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
+use crate::worker_wasm::jwt;
 use crate::worker_wasm::util::{generate_access_token, generate_refresh_token, now_ts, random_bytes};
 use crate::worker_wasm::{brevo, env::env_string};
 
@@ -180,6 +181,33 @@ fn build_finish_signup_url(base: &str, email: &str, token: &str) -> Result<Strin
     Ok(format!("{base}/#/finish-signup/?{query_string}"))
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RegisterVerifyClaims {
+    // Not before
+    nbf: i64,
+    // Expiration time
+    exp: i64,
+    // Issuer
+    iss: String,
+    // Subject (email)
+    sub: String,
+
+    name: Option<String>,
+    // True when the token was delivered via email (i.e., verification was required).
+    verified: bool,
+}
+
+fn register_verify_issuer(req: &Request, env: &Env) -> Result<String> {
+    Ok(format!("{}|register_verify", base_url(req, env)?))
+}
+
+fn register_verify_jwt_secret(env: &Env) -> Option<Vec<u8>> {
+    env_string(env, "REGISTER_VERIFY_JWT_SECRET")
+        .or_else(|| env_string(env, "JWT_SECRET"))
+        .map(|s| s.trim().as_bytes().to_vec())
+        .filter(|b| !b.is_empty())
+}
+
 async fn enumeration_delay() {
     // Approximate Vaultwarden's mitigation (1s +/- 100ms) to reduce timing side-channels.
     // Best-effort: if Delay is unavailable in the runtime, we simply skip the delay.
@@ -226,6 +254,7 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
     }
 
     let should_send_mail = brevo::brevo_is_configured(env) && parse_bool_env(env, "SIGNUPS_VERIFY");
+    let jwt_secret = register_verify_jwt_secret(env);
 
     // If we're going to send mail, don't send it to already-registered accounts.
     if should_send_mail {
@@ -235,10 +264,12 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
             .await
             .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
+        // Match Vaultwarden behavior: treat a user with stored asymmetric keys as "already registered".
+        // (Invited/pending users may exist without keys.)
         let registered = existing
             .as_ref()
-            .and_then(|u| u.password_hash.as_ref())
-            .is_some_and(|h| !h.is_empty());
+            .and_then(|u| u.private_key.as_ref())
+            .is_some_and(|k| !k.is_empty());
 
         if registered {
             enumeration_delay().await;
@@ -247,23 +278,42 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
         }
     }
 
-    // Store an opaque token (30 minutes, like Vaultwarden).
+    // Vaultwarden uses a JWT token for this flow.
+    // For backwards compatibility, we keep the older DB-backed opaque token path if a JWT secret is not configured.
     let now = now_ts();
-    let token = crate::worker_wasm::util::hex_encode(&random_bytes(32));
-    let expires_at = now + 30 * 60;
+    let token = if let Some(ref secret) = jwt_secret {
+        let issuer = register_verify_issuer(&req, env)?;
+        let claims = RegisterVerifyClaims {
+            nbf: now,
+            exp: now + 30 * 60,
+            iss: issuer,
+            sub: email.clone(),
+            name: payload.name.clone(),
+            verified: should_send_mail,
+        };
 
-    let active = register_verification::ActiveModel {
-        id: Set(token.clone()),
-        email: Set(email.clone()),
-        name: Set(payload.name.clone()),
-        verified: Set(should_send_mail),
-        created_at: Set(now),
-        expires_at: Set(expires_at),
+        jwt::encode_hs256(secret, &claims).map_err(|e| worker::Error::RustError(e.to_string()))?
+    } else {
+        // Store an opaque token (30 minutes, like Vaultwarden).
+        let token = crate::worker_wasm::util::hex_encode(&random_bytes(32));
+        let expires_at = now + 30 * 60;
+
+        let active = register_verification::ActiveModel {
+            id: Set(token.clone()),
+            email: Set(email.clone()),
+            name: Set(payload.name.clone()),
+            // Kept for compatibility; not currently used by the worker implementation.
+            verified: Set(should_send_mail),
+            created_at: Set(now),
+            expires_at: Set(expires_at),
+        };
+
+        if let Err(e) = active.insert(&db).await {
+            return internal_error_response(&req, "Failed to persist register verification token", &e);
+        }
+
+        token
     };
-
-    if let Err(e) = active.insert(&db).await {
-        return internal_error_response(&req, "Failed to persist register verification token", &e);
-    }
 
     if should_send_mail {
         let base = base_url(&req, env)?;
@@ -318,32 +368,98 @@ pub async fn handle_register_finish(mut req: Request, env: &Env) -> Result<Respo
         );
     };
 
-    let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
-        .one(&db)
-        .await
-        .map_err(|e| worker::Error::RustError(e.to_string()))?
-    else {
-        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-    };
+    // Prefer Vaultwarden-compatible JWT validation when a secret is configured.
+    // Otherwise, fall back to the legacy DB-backed opaque token.
+    let now = now_ts();
+    let mut name_override: Option<String> = None;
 
-    if rec.email.to_lowercase() != email {
-        return error_response(&req, 400, "invalid_email_verification_token", "Email verification token does not match email");
+    if let Some(secret) = register_verify_jwt_secret(env) {
+        match jwt::decode_hs256::<RegisterVerifyClaims>(&secret, &token) {
+            Ok(claims) => {
+                let expected_iss = register_verify_issuer(&req, env)?;
+                let leeway: i64 = 30;
+
+                if claims.iss != expected_iss {
+                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+                }
+
+                if now + leeway < claims.nbf {
+                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+                }
+                if now - leeway > claims.exp {
+                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+                }
+
+                if claims.sub.to_lowercase() != email {
+                    return error_response(
+                        &req,
+                        400,
+                        "invalid_email_verification_token",
+                        "Email verification token does not match email",
+                    );
+                }
+
+                // Prefer explicit name from the finish payload; fall back to the name in the token.
+                if payload.name.is_none() {
+                    name_override = claims.name.clone();
+                }
+            }
+            Err(_) => {
+                // If the token isn't a valid JWT (or the secret changed), try the legacy DB-backed path.
+                let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
+                    .one(&db)
+                    .await
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?
+                else {
+                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+                };
+
+                if rec.email.to_lowercase() != email {
+                    return error_response(
+                        &req,
+                        400,
+                        "invalid_email_verification_token",
+                        "Email verification token does not match email",
+                    );
+                }
+
+                if rec.expires_at <= now {
+                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+                }
+
+                if payload.name.is_none() {
+                    name_override = rec.name.clone();
+                }
+            }
+        }
+    } else {
+        let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
+            .one(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?
+        else {
+            return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+        };
+
+        if rec.email.to_lowercase() != email {
+            return error_response(
+                &req,
+                400,
+                "invalid_email_verification_token",
+                "Email verification token does not match email",
+            );
+        }
+
+        if rec.expires_at <= now {
+            return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+        }
+
+        if payload.name.is_none() {
+            name_override = rec.name.clone();
+        }
     }
 
-    if rec.expires_at <= now_ts() {
-        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-    }
-
-    // Prefer explicit name from the finish payload; fall back to the name stored with the token.
-    let name_override = if payload.name.is_some() { None } else { rec.name.clone() };
-
-    let resp = accounts::register_with_db(&req, &db, payload, name_override).await;
-    if resp.is_ok() {
-        // Best-effort: remove token so it can't be reused.
-        let _ = RegisterVerificationEntity::delete_by_id(rec.id).exec(&db).await;
-    }
-
-    resp
+    accounts::register_with_db(&req, &db, payload, name_override).await
 }
 
 async fn password_grant(

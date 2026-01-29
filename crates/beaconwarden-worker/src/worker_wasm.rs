@@ -12,6 +12,8 @@ pub mod env;
 pub mod handlers;
 #[path = "wasm/http.rs"]
 pub mod http;
+#[path = "wasm/jwt.rs"]
+pub mod jwt;
 #[path = "wasm/util.rs"]
 pub mod util;
 

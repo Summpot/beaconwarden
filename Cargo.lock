@@ -754,6 +754,7 @@ dependencies = [
 name = "beaconwarden-worker"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "console_error_panic_hook",
  "entity",

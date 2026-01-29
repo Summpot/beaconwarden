@@ -15,6 +15,32 @@ Deliver a Bitwarden-compatible server implementation that:
 - Stores data in **Turso (libSQL)** using **SeaORM** (Summpot fork, `libsql` branch).
 - Stores attachments in **Cloudflare R2**, preferring **direct-to-R2 uploads** (presigned URLs) to avoid Worker upload limits.
 
+## Vaultwarden compatibility contract
+
+BeaconWarden MUST remain wire-compatible with **Vaultwarden** for all Bitwarden-facing endpoints.
+
+This means:
+
+- Match endpoint paths, HTTP methods, status codes, and JSON casing/shape.
+- Match behavioral edge cases (timing mitigations, error semantics, and conditional flows).
+- When uncertain, prefer copying Vaultwarden behavior over inventing new flows.
+
+### Signup email verification (Vaultwarden `SIGNUPS_VERIFY`)
+
+Vaultwarden's registration verification for `SIGNUPS_VERIFY` is **link-based**, not a user-entered numeric code.
+
+- Clients call `POST /identity/accounts/register/send-verification-email`.
+  - If email is configured **and** `SIGNUPS_VERIFY=true`, the server sends an email and returns **204 No Content**.
+  - If email verification is not required (or email is not configured), the server returns a token in the response body.
+
+- The verification email contains a link to the web-vault flow:
+  - `/#/finish-signup/?email=<email>&token=<token>`
+
+- The web-vault flow then calls `POST /identity/accounts/register/finish` with `emailVerificationToken`.
+
+Important: Bitwarden desktop clients typically will **not** show an "enter email verification code" prompt for this flow.
+The expected UX is "check your email and click the link".
+
 ## Explicit non-goals (do not implement)
 
 - WebSocket notifications and push notifications:
@@ -58,6 +84,9 @@ Set via `wrangler secret put` or via GitHub Actions secrets:
   - `R2_ACCESS_KEY_ID`
   - `R2_SECRET_ACCESS_KEY`
   - `R2_ACCOUNT_ID`
+
+- Registration verification token signing (recommended):
+  - `REGISTER_VERIFY_JWT_SECRET` (or `JWT_SECRET`)
 
 ### R2 bucket bindings
 
