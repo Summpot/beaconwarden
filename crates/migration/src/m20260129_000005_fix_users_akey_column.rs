@@ -12,67 +12,33 @@ impl MigrationTrait for Migration {
         // - The intended Vaultwarden column name is `users.akey`.
         // - A previous migration accidentally created `users.a_key`.
         //
-        // This migration renames `a_key` -> `akey` when needed and is safe to
-        // run against databases that already have the correct column.
-
-        if !manager.has_table("users").await? {
-            return Ok(());
-        }
-
-        let has_akey = manager.has_column("users", "akey").await?;
-        let has_a_key = manager.has_column("users", "a_key").await?;
-
-        if !has_akey && has_a_key {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(Alias::new("users"))
-                        .rename_column(Alias::new("a_key"), Alias::new("akey"))
-                        .to_owned(),
-                )
-                .await?;
-            return Ok(());
-        }
-
-        if !has_akey {
-            // Best-effort: older DBs might have neither column (e.g. partially migrated).
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(Alias::new("users"))
-                        .add_column(
-                            ColumnDef::new(Alias::new("akey"))
-                                .text()
-                                .not_null()
-                                .default(""),
-                        )
-                        .to_owned(),
-                )
-                .await?;
-        }
+        // This migration is intentionally simple: rename the known-wrong column
+        // `a_key` to the expected Vaultwarden name `akey`.
+        //
+        // NOTE: `SchemaManager::has_table` is not supported by the Sqlite backend
+        // in sea-orm-migration, so we do not use it here.
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Alias::new("users"))
+                    .rename_column(Alias::new("a_key"), Alias::new("akey"))
+                    .to_owned(),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Best-effort rollback. We avoid dropping columns on SQLite/libSQL.
-        if !manager.has_table("users").await? {
-            return Ok(());
-        }
-
-        let has_akey = manager.has_column("users", "akey").await?;
-        let has_a_key = manager.has_column("users", "a_key").await?;
-
-        if has_akey && !has_a_key {
-            let _ = manager
-                .alter_table(
-                    Table::alter()
-                        .table(Alias::new("users"))
-                        .rename_column(Alias::new("akey"), Alias::new("a_key"))
-                        .to_owned(),
-                )
-                .await;
-        }
+        // Best-effort rollback.
+        let _ = manager
+            .alter_table(
+                Table::alter()
+                    .table(Alias::new("users"))
+                    .rename_column(Alias::new("akey"), Alias::new("a_key"))
+                    .to_owned(),
+            )
+            .await;
 
         Ok(())
     }
