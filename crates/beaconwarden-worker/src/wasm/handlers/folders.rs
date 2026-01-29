@@ -8,7 +8,17 @@ use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::util::{now_ts, ts_to_rfc3339, uuid_v4};
 
-use entity::folder;
+use entity::{folder, user};
+
+async fn touch_user_revision(db: &sea_orm::DatabaseConnection, user_id: &str, now: i64) -> Result<()> {
+    user::Entity::update_many()
+        .col_expr(user::Column::UpdatedAt, sea_orm::sea_query::Expr::value(now))
+        .filter(user::Column::Id.eq(user_id))
+        .exec(db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    Ok(())
+}
 
 fn folder_json(f: &folder::Model) -> Value {
     serde_json::json!({
@@ -40,7 +50,7 @@ pub async fn handle_folders(mut req: Request, env: &Env) -> Result<Response> {
     match req.method() {
         Method::Get => {
             let folders = folder::Entity::find()
-                .filter(folder::Column::UserId.eq(auth.user.id))
+                .filter(folder::Column::UserId.eq(auth.user.id.clone()))
                 .all(&db)
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -72,7 +82,7 @@ pub async fn handle_folders(mut req: Request, env: &Env) -> Result<Response> {
 
             let active = folder::ActiveModel {
                 id: Set(id.clone()),
-                user_id: Set(auth.user.id),
+                user_id: Set(auth.user.id.clone()),
                 name: Set(name.to_string()),
                 created_at: Set(now),
                 updated_at: Set(now),
@@ -82,6 +92,8 @@ pub async fn handle_folders(mut req: Request, env: &Env) -> Result<Response> {
                 .insert(&db)
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+            touch_user_revision(&db, &auth.user.id, now).await?;
 
             let resp = Response::from_json(&folder_json(&created))?;
             json_with_cors(&req, resp)
@@ -110,7 +122,7 @@ pub async fn handle_folder(mut req: Request, env: &Env, folder_id: String, tail:
     match effective_method {
         Method::Get => {
             let found = folder::Entity::find_by_id(folder_id.clone())
-                .filter(folder::Column::UserId.eq(auth.user.id))
+                .filter(folder::Column::UserId.eq(auth.user.id.clone()))
                 .one(&db)
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -136,7 +148,7 @@ pub async fn handle_folder(mut req: Request, env: &Env, folder_id: String, tail:
             }
 
             let found = folder::Entity::find_by_id(folder_id.clone())
-                .filter(folder::Column::UserId.eq(auth.user.id))
+                .filter(folder::Column::UserId.eq(auth.user.id.clone()))
                 .one(&db)
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -155,13 +167,16 @@ pub async fn handle_folder(mut req: Request, env: &Env, folder_id: String, tail:
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
+            touch_user_revision(&db, &auth.user.id, now).await?;
+
             let resp = Response::from_json(&folder_json(&updated))?;
             json_with_cors(&req, resp)
         }
         Method::Delete => {
+            let now = now_ts();
             let res = folder::Entity::delete_many()
                 .filter(folder::Column::Id.eq(folder_id))
-                .filter(folder::Column::UserId.eq(auth.user.id))
+                .filter(folder::Column::UserId.eq(auth.user.id.clone()))
                 .exec(&db)
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -169,6 +184,8 @@ pub async fn handle_folder(mut req: Request, env: &Env, folder_id: String, tail:
             if res.rows_affected == 0 {
                 return error_response(&req, 404, "not_found", "Invalid folder");
             }
+
+            touch_user_revision(&db, &auth.user.id, now).await?;
 
             let resp = Response::empty()?.with_status(200);
             json_with_cors(&req, resp)

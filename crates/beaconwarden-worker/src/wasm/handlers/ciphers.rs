@@ -9,7 +9,17 @@ use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::util::{now_ts, ts_to_rfc3339, uuid_v4};
 
-use entity::{cipher, folder, folder_cipher};
+use entity::{cipher, folder, folder_cipher, user};
+
+async fn touch_user_revision(db: &sea_orm::DatabaseConnection, user_id: &str, now: i64) -> Result<()> {
+    user::Entity::update_many()
+        .col_expr(user::Column::UpdatedAt, sea_orm::sea_query::Expr::value(now))
+        .filter(user::Column::Id.eq(user_id))
+        .exec(db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    Ok(())
+}
 
 fn cipher_json(c: &cipher::Model, folder_id: Option<String>) -> Value {
     let mut obj: Value = serde_json::from_str(&c.data).unwrap_or_else(|_| serde_json::json!({}));
@@ -112,6 +122,154 @@ async fn set_cipher_folder(
     Ok(None)
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportFolderData {
+    name: String,
+    id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportRelationsData {
+    // Cipher index
+    key: usize,
+    // Folder index
+    value: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportData {
+    ciphers: Vec<Value>,
+    folders: Vec<ImportFolderData>,
+    folder_relationships: Vec<ImportRelationsData>,
+}
+
+pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: ImportData = match req.json().await {
+        Ok(p) => p,
+        Err(_) => return error_response(&req, 400, "invalid_json", "Invalid JSON body"),
+    };
+
+    // Pre-validate to avoid partial imports.
+    for cipher in &payload.ciphers {
+        let name = value_get_string(cipher, "name").unwrap_or_default();
+        if name.trim().is_empty() {
+            return error_response(&req, 400, "invalid_name", "Cipher name cannot be blank");
+        }
+    }
+    for folder in &payload.folders {
+        if folder.name.trim().is_empty() {
+            return error_response(&req, 400, "invalid_name", "Folder name cannot be blank");
+        }
+    }
+
+    // Create or reuse folders.
+    let existing_folders: std::collections::HashMap<String, String> = folder::Entity::find()
+        .filter(folder::Column::UserId.eq(auth.user.id.clone()))
+        .all(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .into_iter()
+        .map(|f| (f.id.clone(), f.id))
+        .collect();
+
+    let mut folder_ids: Vec<String> = Vec::with_capacity(payload.folders.len());
+    for f in payload.folders {
+        // Vaultwarden behavior: only reuse a folder if it already exists for this user.
+        // Otherwise create a new folder with a new id (ignore imported id to avoid collisions).
+        if let Some(id) = f.id.as_ref().and_then(|id| existing_folders.get(id)).cloned() {
+            folder_ids.push(id);
+            continue;
+        }
+
+        let now = now_ts();
+        let folder_id = uuid_v4();
+        let active = folder::ActiveModel {
+            id: Set(folder_id.clone()),
+            user_id: Set(auth.user.id.clone()),
+            name: Set(f.name.trim().to_string()),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        let _ = active
+            .insert(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        folder_ids.push(folder_id);
+    }
+
+    // Build cipher-index -> folder-id map.
+    let mut relations_map: HashMap<usize, usize> = HashMap::with_capacity(payload.folder_relationships.len());
+    for rel in payload.folder_relationships {
+        relations_map.insert(rel.key, rel.value);
+    }
+
+    // Create ciphers.
+    for (idx, cipher_payload) in payload.ciphers.into_iter().enumerate() {
+        let name = value_get_string(&cipher_payload, "name").unwrap_or_default();
+        let cipher_type = value_get_i32(&cipher_payload, "type").unwrap_or(1);
+
+        // Always create new ids during import, matching Vaultwarden.
+        let id = uuid_v4();
+        let now = now_ts();
+
+        let folder_id = relations_map
+            .get(&idx)
+            .and_then(|folder_idx| folder_ids.get(*folder_idx))
+            .cloned();
+
+        let active = cipher::ActiveModel {
+            id: Set(id.clone()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            user_id: Set(Some(auth.user.id.clone())),
+            organization_id: Set(value_get_string(&cipher_payload, "organizationId")),
+            key: Set(value_get_string(&cipher_payload, "key")),
+            r#type: Set(cipher_type),
+            name: Set(name),
+            notes: Set(value_get_string(&cipher_payload, "notes")),
+            fields: Set(cipher_payload.get("fields").map(|v| v.to_string())),
+            data: Set(cipher_payload.to_string()),
+            password_history: Set(cipher_payload.get("passwordHistory").map(|v| v.to_string())),
+            deleted_at: Set(None),
+            reprompt: Set(value_get_i32(&cipher_payload, "reprompt")),
+        };
+
+        let _ = active
+            .insert(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        if let Some(resp) = set_cipher_folder(&req, &db, &auth.user.id, &id, folder_id).await? {
+            return Ok(resp);
+        }
+    }
+
+    // Touch user revision so clients resync.
+    touch_user_revision(&db, &auth.user.id, now_ts()).await?;
+
+    let resp = Response::empty()?.with_status(200);
+    json_with_cors(&req, resp)
+}
+
 pub async fn handle_ciphers(mut req: Request, env: &Env) -> Result<Response> {
     let db = match db_connect(env).await {
         Ok(db) => db,
@@ -197,6 +355,9 @@ pub async fn handle_ciphers(mut req: Request, env: &Env) -> Result<Response> {
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
+            // Touch user revision so clients resync.
+            touch_user_revision(&db, &auth.user.id, now).await?;
+
             // Folder mapping.
             if let Some(resp) = set_cipher_folder(&req, &db, &auth.user.id, &id, folder_id).await? {
                 return Ok(resp);
@@ -245,12 +406,15 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
             return error_response(&req, 404, "not_found", "Invalid cipher");
         }
 
+        touch_user_revision(&db, &auth.user.id, now).await?;
+
         let resp = Response::empty()?.with_status(200);
         return json_with_cors(&req, resp);
     }
 
     if tail == Some("delete") && method == Method::Post {
         // Hard delete.
+        let now = now_ts();
         let res = cipher::Entity::delete_many()
             .filter(cipher::Column::Id.eq(cipher_id.clone()))
             .filter(cipher::Column::UserId.eq(auth.user.id.clone()))
@@ -261,6 +425,8 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
         if res.rows_affected == 0 {
             return error_response(&req, 404, "not_found", "Invalid cipher");
         }
+
+        touch_user_revision(&db, &auth.user.id, now).await?;
 
         let resp = Response::empty()?.with_status(200);
         return json_with_cors(&req, resp);
@@ -280,6 +446,8 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
         if res.rows_affected == 0 {
             return error_response(&req, 404, "not_found", "Invalid cipher");
         }
+
+        touch_user_revision(&db, &auth.user.id, now).await?;
 
         let resp = Response::empty()?.with_status(200);
         return json_with_cors(&req, resp);
@@ -344,6 +512,8 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
                 .await
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
+            touch_user_revision(&db, &auth.user.id, now).await?;
+
             if let Some(resp) = set_cipher_folder(&req, &db, &auth.user.id, &cipher_id, folder_id).await? {
                 return Ok(resp);
             }
@@ -354,6 +524,7 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
         }
         Method::Delete => {
             // Hard delete.
+            let now = now_ts();
             let res = cipher::Entity::delete_many()
                 .filter(cipher::Column::Id.eq(cipher_id.clone()))
                 .filter(cipher::Column::UserId.eq(auth.user.id.clone()))
@@ -364,6 +535,8 @@ pub async fn handle_cipher(mut req: Request, env: &Env, cipher_id: String, tail:
             if res.rows_affected == 0 {
                 return error_response(&req, 404, "not_found", "Invalid cipher");
             }
+
+            touch_user_revision(&db, &auth.user.id, now).await?;
 
             let resp = Response::empty()?.with_status(200);
             json_with_cors(&req, resp)

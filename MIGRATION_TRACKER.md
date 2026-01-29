@@ -112,6 +112,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | POST | `/api/accounts/register` | Registration (legacy path) | DONE |
 | POST | `/identity/connect/token` | Login/refresh token | DONE |
 | GET | `/api/sync` | Sync response | DONE |
+| POST | `/api/ciphers/import` | Bulk cipher import (Bitwarden JSON) | DONE |
 | POST | `/identity/accounts/prelogin` | Alias to `/api/accounts/prelogin` | DONE |
 | POST | `/identity/accounts/register` | Alias to `/api/accounts/register` | DONE |
 | POST | `/identity/accounts/register/send-verification-email` | Signup email verification | DONE |

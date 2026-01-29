@@ -138,6 +138,9 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 
     // Ciphers.
+    if req.method() == Method::Post && path == "/api/ciphers/import" {
+        return handlers::ciphers::handle_ciphers_import(req, &env).await;
+    }
     if path == "/api/ciphers" || path == "/api/ciphers/create" {
         return handlers::ciphers::handle_ciphers(req, &env).await;
     }
