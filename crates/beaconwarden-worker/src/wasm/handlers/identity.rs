@@ -1,5 +1,8 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::Value;
+use serde::Serialize;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use worker::{Env, FormData, Method, Request, Response, Result, Url};
 use std::time::Duration;
 
@@ -7,7 +10,7 @@ use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::jwt;
-use crate::worker_wasm::util::{generate_access_token, generate_refresh_token, now_ts, random_bytes};
+use crate::worker_wasm::util::{generate_refresh_token, now_ts, random_bytes};
 use crate::worker_wasm::{brevo, env::env_string};
 
 use entity::{device, user};
@@ -98,6 +101,155 @@ fn token_response_json(u: &user::Model, access_token: &str, refresh_token: &str,
     }
 
     result
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LoginJwtClaims {
+    // Not before
+    nbf: i64,
+    // Expiration time
+    exp: i64,
+    // Issuer
+    iss: String,
+    // Subject (user id)
+    sub: String,
+
+    premium: bool,
+    name: String,
+    email: String,
+    email_verified: bool,
+
+    // user security_stamp
+    sstamp: String,
+    // device id
+    device: String,
+    // display name derived from device type
+    devicetype: String,
+    // client id (web/desktop/mobile/etc)
+    client_id: String,
+
+    // ["api", "offline_access"]
+    scope: Vec<String>,
+    // ["Application"]
+    amr: Vec<String>,
+}
+
+fn login_issuer(req: &Request, env: &Env) -> Result<String> {
+    Ok(format!("{}|login", base_url(req, env)?))
+}
+
+fn login_jwt_secret(env: &Env) -> Option<Vec<u8>> {
+    env_string(env, "JWT_SECRET")
+        .map(|s| s.trim().as_bytes().to_vec())
+        .filter(|b| !b.is_empty())
+}
+
+fn scope_to_vec(scope: &str) -> Vec<String> {
+    scope
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn device_type_display(value: i32) -> &'static str {
+    // Mirrors Vaultwarden's `DeviceType::from_i32(..).to_string()` display strings.
+    match value {
+        0 => "Android",
+        1 => "iOS",
+        2 => "Chrome Extension",
+        3 => "Firefox Extension",
+        4 => "Opera Extension",
+        5 => "Edge Extension",
+        6 => "Windows",
+        7 => "macOS",
+        8 => "Linux",
+        9 => "Chrome",
+        10 => "Firefox",
+        11 => "Opera",
+        12 => "Edge",
+        13 => "Internet Explorer",
+        14 => "Unknown Browser",
+        15 => "Android",
+        16 => "UWP",
+        17 => "Safari",
+        18 => "Vivaldi",
+        19 => "Vivaldi Extension",
+        20 => "Safari Extension",
+        21 => "SDK",
+        22 => "Server",
+        23 => "Windows CLI",
+        24 => "macOS CLI",
+        25 => "Linux CLI",
+        _ => "Unknown Browser",
+    }
+}
+
+fn encode_opaque_jwt<T: Serialize>(claims: &T) -> Result<String> {
+    // Produce a JWT-shaped token (header.payload.signature) that clients can parse.
+    // Server-side auth still treats the token as an opaque bearer value.
+    // If JWT_SECRET is configured, we prefer a proper HS256 signature.
+    let header = serde_json::json!({
+        "alg": "HS256",
+        "typ": "JWT",
+    });
+    let header_json = serde_json::to_vec(&header)
+        .map_err(|e| worker::Error::RustError(format!("Failed to serialize JWT header: {e}")))?;
+    let claims_json = serde_json::to_vec(claims)
+        .map_err(|e| worker::Error::RustError(format!("Failed to serialize JWT claims: {e}")))?;
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+
+    // Random signature bytes to ensure uniqueness.
+    let sig = random_bytes(32);
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);
+
+    Ok(format!("{header_b64}.{claims_b64}.{sig_b64}"))
+}
+
+fn issue_login_access_token(
+    req: &Request,
+    env: &Env,
+    u: &user::Model,
+    device_id: &str,
+    device_type: i32,
+    client_id: &str,
+    scope: &str,
+    expires_in: i64,
+    now: i64,
+) -> Result<String> {
+    let name = u
+        .name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| u.email.clone());
+
+    let claims = LoginJwtClaims {
+        nbf: now,
+        exp: now + expires_in,
+        iss: login_issuer(req, env)?,
+        sub: u.id.clone(),
+        premium: true,
+        name,
+        email: u.email.clone(),
+        // Worker implementation currently has no persistent email verification flag.
+        // Keep clients happy by reporting verified.
+        email_verified: true,
+        sstamp: u.security_stamp.clone(),
+        device: device_id.to_string(),
+        devicetype: device_type_display(device_type).to_string(),
+        client_id: client_id.to_string(),
+        scope: scope_to_vec(scope),
+        amr: vec!["Application".to_string()],
+    };
+
+    if let Some(secret) = login_jwt_secret(env) {
+        jwt::encode_hs256(&secret, &claims)
+            .map_err(|e| worker::Error::RustError(format!("Failed to encode login JWT: {e}")))
+    } else {
+        encode_opaque_jwt(&claims)
+    }
 }
 
 pub async fn handle_connect_token(mut req: Request, env: &Env) -> Result<Response> {
@@ -464,7 +616,7 @@ pub async fn handle_register_finish(mut req: Request, env: &Env) -> Result<Respo
 
 async fn password_grant(
     req: &Request,
-    _env: &Env,
+    env: &Env,
     db: &sea_orm::DatabaseConnection,
     form: &FormData,
 ) -> Result<Response> {
@@ -563,8 +715,18 @@ async fn password_grant(
     let refresh_token = generate_refresh_token();
     dev_active.refresh_token = Set(refresh_token.clone());
 
-    let access_token = generate_access_token();
     let expires_in: i64 = 3600;
+    let access_token = issue_login_access_token(
+        req,
+        env,
+        &u,
+        &device_identifier,
+        device_type,
+        &client_id,
+        &scope,
+        expires_in,
+        now,
+    )?;
     dev_active.access_token = Set(Some(access_token.clone()));
     dev_active.access_token_expires_at = Set(Some(now + expires_in));
     dev_active.updated_at = Set(now);
@@ -586,7 +748,7 @@ async fn password_grant(
 
 async fn refresh_grant(
     req: &Request,
-    _env: &Env,
+    env: &Env,
     db: &sea_orm::DatabaseConnection,
     form: &FormData,
 ) -> Result<Response> {
@@ -625,7 +787,20 @@ async fn refresh_grant(
     let expires_in: i64 = 3600;
 
     let new_refresh_token = generate_refresh_token();
-    let access_token = generate_access_token();
+    // Scope is not included in refresh requests by some clients. Keep the canonical one.
+    let scope = form_get_string(form, "scope").unwrap_or_else(|| "api offline_access".to_string());
+    let client_id = form_get_string(form, "client_id").unwrap_or_else(|| "desktop".to_string());
+    let access_token = issue_login_access_token(
+        req,
+        env,
+        &u,
+        &dev.id,
+        dev.device_type,
+        &client_id,
+        &scope,
+        expires_in,
+        now,
+    )?;
 
     let mut active: device::ActiveModel = dev.into();
     active.refresh_token = Set(new_refresh_token.clone());
@@ -636,9 +811,6 @@ async fn refresh_grant(
     if let Err(e) = active.update(db).await {
         return internal_error_response(req, "Failed to save device", &e);
     }
-
-    // Scope is not included in refresh requests by some clients. Keep the canonical one.
-    let scope = form_get_string(form, "scope").unwrap_or_else(|| "api offline_access".to_string());
 
     let json = token_response_json(&u, &access_token, &new_refresh_token, &scope, expires_in);
     let resp = Response::from_json(&json)?;
