@@ -186,46 +186,101 @@ pub(crate) async fn register_with_db(
     let now = now_ts();
     let salt = random_bytes(64);
     let server_iterations: i32 = 100_000;
-    let pwd_hash = crypto::hash_password(payload.master_password_hash.as_bytes(), &salt, server_iterations as u32);
+    let pwd_hash =
+        crypto::hash_password(payload.master_password_hash.as_bytes(), &salt, server_iterations as u32);
 
-    let id = existing
-        .as_ref()
-        .map(|u| u.id.clone())
-        // 128-bit random id.
-        .unwrap_or_else(|| crate::worker_wasm::util::hex_encode(&random_bytes(16)));
+    let final_name = payload
+        .name
+        .clone()
+        .or(name_override)
+        .or_else(|| Some(email.clone()));
 
-    let created_at = existing.as_ref().map(|u| u.created_at).unwrap_or(now);
-
-    let active: user::ActiveModel = user::ActiveModel {
-        id: Set(id),
-        email: Set(email.clone()),
-        enabled: Set(true),
-        name: Set(
-            payload
-                .name
-                .clone()
-                .or(name_override)
-                .or_else(|| Some(email.clone())),
-        ),
-        password_hash: Set(Some(pwd_hash)),
-        salt: Set(Some(salt)),
-        password_iterations: Set(server_iterations),
-        akey: Set(payload.key.clone()),
-        private_key: Set(payload.keys.as_ref().map(|k| k.encrypted_private_key.clone())),
-        public_key: Set(payload.keys.as_ref().map(|k| k.public_key.clone())),
-        security_stamp: Set(generate_security_stamp()),
-        client_kdf_type: Set(payload.kdf),
-        client_kdf_iter: Set(payload.kdf_iterations),
-        client_kdf_memory: Set(payload.kdf_memory),
-        client_kdf_parallelism: Set(payload.kdf_parallelism),
-        created_at: Set(created_at),
-        updated_at: Set(now),
-    };
+    let private_key = payload.keys.as_ref().map(|k| k.encrypted_private_key.clone());
+    let public_key = payload.keys.as_ref().map(|k| k.public_key.clone());
 
     // Insert or update.
-    // SeaORM's save requires primary key; it will do update if exists.
-    if let Err(e) = active.save(db).await {
-        return internal_error_response(req, "Failed to save user", &e);
+    // NOTE: SeaORM's `save()` will attempt UPDATE when the primary key is set.
+    // Our IDs are client-generated strings, so new records must use INSERT explicitly.
+    if let Some(u) = existing {
+        let mut active: user::ActiveModel = u.into();
+        active.email = Set(email.clone());
+        active.enabled = Set(true);
+        active.name = Set(final_name.clone());
+        active.password_hash = Set(Some(pwd_hash.clone()));
+        active.salt = Set(Some(salt.clone()));
+        active.password_iterations = Set(server_iterations);
+        active.akey = Set(payload.key.clone());
+        active.private_key = Set(private_key.clone());
+        active.public_key = Set(public_key.clone());
+        active.security_stamp = Set(generate_security_stamp());
+        active.client_kdf_type = Set(payload.kdf);
+        active.client_kdf_iter = Set(payload.kdf_iterations);
+        active.client_kdf_memory = Set(payload.kdf_memory);
+        active.client_kdf_parallelism = Set(payload.kdf_parallelism);
+        active.updated_at = Set(now);
+
+        if let Err(e) = active.update(db).await {
+            return internal_error_response(req, "Failed to save user", &e);
+        }
+    } else {
+        let id = crate::worker_wasm::util::hex_encode(&random_bytes(16));
+        let active: user::ActiveModel = user::ActiveModel {
+            id: Set(id),
+            email: Set(email.clone()),
+            enabled: Set(true),
+            name: Set(final_name.clone()),
+            password_hash: Set(Some(pwd_hash.clone())),
+            salt: Set(Some(salt.clone())),
+            password_iterations: Set(server_iterations),
+            akey: Set(payload.key.clone()),
+            private_key: Set(private_key.clone()),
+            public_key: Set(public_key.clone()),
+            security_stamp: Set(generate_security_stamp()),
+            client_kdf_type: Set(payload.kdf),
+            client_kdf_iter: Set(payload.kdf_iterations),
+            client_kdf_memory: Set(payload.kdf_memory),
+            client_kdf_parallelism: Set(payload.kdf_parallelism),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        if let Err(insert_err) = active.insert(db).await {
+            // If we raced another request, retry by loading the user and updating it.
+            match UserEntity::find()
+                .filter(user::Column::Email.eq(&email))
+                .one(db)
+                .await
+            {
+                Ok(Some(u)) => {
+                    if u.password_hash.as_ref().is_some_and(|v| !v.is_empty()) {
+                        return error_response(req, 400, "already_registered", "User already exists");
+                    }
+
+                    let mut active: user::ActiveModel = u.into();
+                    active.email = Set(email.clone());
+                    active.enabled = Set(true);
+                    active.name = Set(final_name.clone());
+                    active.password_hash = Set(Some(pwd_hash.clone()));
+                    active.salt = Set(Some(salt.clone()));
+                    active.password_iterations = Set(server_iterations);
+                    active.akey = Set(payload.key.clone());
+                    active.private_key = Set(private_key.clone());
+                    active.public_key = Set(public_key.clone());
+                    active.security_stamp = Set(generate_security_stamp());
+                    active.client_kdf_type = Set(payload.kdf);
+                    active.client_kdf_iter = Set(payload.kdf_iterations);
+                    active.client_kdf_memory = Set(payload.kdf_memory);
+                    active.client_kdf_parallelism = Set(payload.kdf_parallelism);
+                    active.updated_at = Set(now);
+
+                    if let Err(e) = active.update(db).await {
+                        return internal_error_response(req, "Failed to save user", &e);
+                    }
+                }
+                Ok(None) => return internal_error_response(req, "Failed to save user", &insert_err),
+                Err(e) => return internal_error_response(req, "Failed to save user", &e),
+            }
+        }
     }
 
     let resp = Response::from_json(&serde_json::json!({

@@ -405,7 +405,7 @@ async fn password_grant(
         .await
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
-    let mut dev_active: device::ActiveModel = match existing_device {
+    let (mut dev_active, is_new_device): (device::ActiveModel, bool) = match existing_device {
         Some(d) => {
             if d.user_id != u.id {
                 return oauth_error(req, 400, "invalid_grant", "Device identifier is already registered");
@@ -413,22 +413,25 @@ async fn password_grant(
             let mut active: device::ActiveModel = d.into();
             active.name = Set(device_name.clone());
             active.device_type = Set(device_type);
-            active
+            (active, false)
         }
-        None => device::ActiveModel {
-            id: Set(device_identifier.clone()),
-            user_id: Set(u.id.clone()),
-            name: Set(device_name.clone()),
-            device_type: Set(device_type),
-            push_uuid: Set(Some(crate::worker_wasm::util::hex_encode(&random_bytes(16)))),
-            push_token: Set(None),
-            refresh_token: Set(String::new()),
-            twofactor_remember: Set(None),
-            access_token: Set(None),
-            access_token_expires_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-        },
+        None => (
+            device::ActiveModel {
+                id: Set(device_identifier.clone()),
+                user_id: Set(u.id.clone()),
+                name: Set(device_name.clone()),
+                device_type: Set(device_type),
+                push_uuid: Set(Some(crate::worker_wasm::util::hex_encode(&random_bytes(16)))),
+                push_token: Set(None),
+                refresh_token: Set(String::new()),
+                twofactor_remember: Set(None),
+                access_token: Set(None),
+                access_token_expires_at: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            },
+            true,
+        ),
     };
 
     // Rotate refresh token on successful login.
@@ -441,7 +444,13 @@ async fn password_grant(
     dev_active.access_token_expires_at = Set(Some(now + expires_in));
     dev_active.updated_at = Set(now);
 
-    if let Err(e) = dev_active.save(db).await {
+    let save_res = if is_new_device {
+        dev_active.insert(db).await
+    } else {
+        dev_active.update(db).await
+    };
+
+    if let Err(e) = save_res {
         return internal_error_response(req, "Failed to save device", &e);
     }
 
@@ -497,7 +506,7 @@ async fn refresh_grant(
     active.access_token_expires_at = Set(Some(now + expires_in));
     active.updated_at = Set(now);
 
-    if let Err(e) = active.save(db).await {
+    if let Err(e) = active.update(db).await {
         return internal_error_response(req, "Failed to save device", &e);
     }
 
