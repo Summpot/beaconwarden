@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde_json::Value;
 use worker::{Env, Request, Response, Result};
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
@@ -8,11 +9,120 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::env::env_string;
+use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
-use crate::worker_wasm::util::{generate_security_stamp, now_ts, random_bytes, uuid_v4};
+use crate::worker_wasm::util::{
+    generate_security_stamp, normalize_user_id_for_client, now_ts, random_bytes, uuid_v4,
+};
 use crate::worker_wasm::{brevo};
 
 use entity::{user, user::Entity as UserEntity};
+
+fn profile_json(u: &user::Model) -> Value {
+    let status = if u.password_hash.as_ref().is_some_and(|v| !v.is_empty()) {
+        0
+    } else {
+        1
+    };
+
+    serde_json::json!({
+        "_status": status,
+        "id": normalize_user_id_for_client(&u.id),
+        "name": u.name.clone().unwrap_or_else(|| u.email.clone()),
+        "email": u.email,
+        "emailVerified": true,
+        "premium": true,
+        "premiumFromOrganization": false,
+        "culture": "en-US",
+        "twoFactorEnabled": false,
+        "key": u.akey,
+        "privateKey": u.private_key.clone().unwrap_or_default(),
+        "securityStamp": u.security_stamp,
+        "organizations": [],
+        "providers": [],
+        "providerOrganizations": [],
+        "forcePasswordReset": false,
+        "avatarColor": Value::Null,
+        "usesKeyConnector": false,
+        "creationDate": Value::Null,
+        "object": "profile",
+    })
+}
+
+pub async fn handle_profile(req: Request, env: &Env) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let resp = Response::from_json(&profile_json(&auth.user))?;
+    json_with_cors(&req, resp)
+}
+
+pub async fn handle_revision_date(req: Request, env: &Env) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    // Vaultwarden returns a timestamp in milliseconds.
+    let revision_ms: i64 = auth.user.updated_at.saturating_mul(1000);
+    let resp = Response::from_json(&revision_ms)?;
+    json_with_cors(&req, resp)
+}
+
+pub async fn handle_tasks(req: Request, _env: &Env) -> Result<Response> {
+    let resp = Response::from_json(&serde_json::json!({
+        "data": [],
+        "object": "list",
+    }))?;
+    json_with_cors(&req, resp)
+}
+
+pub async fn handle_user_public_key(req: Request, env: &Env, user_id: String) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    // Matches legacy behavior: require authentication but allow fetching arbitrary users' public keys.
+    let _auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let user_id = normalize_user_id_for_client(&user_id);
+    let found = user::Entity::find_by_id(user_id.clone())
+        .one(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let Some(u) = found else {
+        return error_response(&req, 404, "not_found", "User doesn't exist");
+    };
+
+    let Some(pk) = u.public_key.as_ref().filter(|s| !s.trim().is_empty()) else {
+        return error_response(&req, 404, "not_found", "User has no public_key");
+    };
+
+    let resp = Response::from_json(&serde_json::json!({
+        "userId": normalize_user_id_for_client(&u.id),
+        "publicKey": pk,
+        "object": "userKey",
+    }))?;
+
+    json_with_cors(&req, resp)
+}
 
 fn base_url(req: &Request, env: &Env) -> Result<String> {
     if let Some(v) = env_string(env, "BASE_URL") {

@@ -85,8 +85,8 @@ Set via `wrangler secret put` or via GitHub Actions secrets:
   - `R2_SECRET_ACCESS_KEY`
   - `R2_ACCOUNT_ID`
 
-- Registration verification token signing (recommended):
-  - `REGISTER_VERIFY_JWT_SECRET` (or `JWT_SECRET`)
+- JWT signing secrets MUST be stored in libSQL in the `server_secrets` table (e.g. key `jwt_secret`).
+  - Do not introduce `JWT_SECRET` / `REGISTER_VERIFY_JWT_SECRET` environment variables in this repo.
 
 ### R2 bucket bindings
 
@@ -131,7 +131,13 @@ After any Rust change:
 - `cargo check -p beaconwarden-worker --target wasm32-unknown-unknown`
 - `worker-build --release crates/beaconwarden-worker` (ensures Wrangler bundle exists)
 
+## Migration tracker discipline
+
+- `MIGRATION_TRACKER.md` is the single source of truth for migration progress.
+- Whenever you start/finish work that changes progress, you MUST update the corresponding **Status** cells in `MIGRATION_TRACKER.md` in the same change.
+- Do **not** add narrative progress entries. We intentionally do **not** maintain a progress log in the tracker; only keep the structured status tables up to date.
+
 ## Deliverables to keep in the repo root
 
-- `MIGRATION_TRACKER.md` must stay updated.
+- `MIGRATION_TRACKER.md` must stay updated (status tables only; no progress log).
 - Any “misc notes” should live in the repo root for easy review.

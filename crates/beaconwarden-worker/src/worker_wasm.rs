@@ -96,6 +96,30 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Post && path == "/api/accounts/register" {
         return handlers::accounts::handle_register(req, &env).await;
     }
+    if req.method() == Method::Get && path == "/api/accounts/profile" {
+        return handlers::accounts::handle_profile(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/accounts/revision-date" {
+        return handlers::accounts::handle_revision_date(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/tasks" {
+        return handlers::accounts::handle_tasks(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/devices" {
+        return handlers::devices::handle_devices(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/devices/identifier/") {
+        // Matches legacy: GET /devices/identifier/<device_id>
+        let device_id = rest.split('/').next().unwrap_or("").to_string();
+        return handlers::devices::handle_device(req, &env, device_id).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/users/") {
+        // Matches legacy: GET /users/<user_id>/public-key
+        if let Some(user_id) = rest.strip_suffix("/public-key") {
+            let user_id = user_id.trim_matches('/').to_string();
+            return handlers::accounts::handle_user_public_key(req, &env, user_id).await;
+        }
+    }
     if req.method() == Method::Get && path == "/api/config" {
         return handlers::config::handle_config(req, &env).await;
     }

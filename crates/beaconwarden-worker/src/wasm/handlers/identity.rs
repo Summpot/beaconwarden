@@ -1,8 +1,6 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::Value;
 use serde::Serialize;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use worker::{Env, FormData, Method, Request, Response, Result, Url};
 use std::time::Duration;
 
@@ -14,7 +12,6 @@ use crate::worker_wasm::util::{generate_refresh_token, normalize_user_id_for_cli
 use crate::worker_wasm::{brevo, env::env_string};
 
 use entity::{device, server_secret, user};
-use entity::{register_verification, register_verification::Entity as RegisterVerificationEntity};
 
 use super::accounts;
 
@@ -142,12 +139,6 @@ fn login_issuer(req: &Request, env: &Env) -> Result<String> {
     Ok(format!("{}|login", base_url(req, env)?))
 }
 
-fn login_jwt_secret(env: &Env) -> Option<Vec<u8>> {
-    env_string(env, "JWT_SECRET")
-        .map(|s| s.trim().as_bytes().to_vec())
-        .filter(|b| !b.is_empty())
-}
-
 async fn server_secret_get_or_create(
     db: &sea_orm::DatabaseConnection,
     name: &str,
@@ -180,25 +171,9 @@ async fn server_secret_get_or_create(
     }
 }
 
-async fn login_jwt_secret_or_db(
-    env: &Env,
-    db: &sea_orm::DatabaseConnection,
-) -> Option<Vec<u8>> {
-    if let Some(secret) = login_jwt_secret(env) {
-        return Some(secret);
-    }
-
-    match server_secret_get_or_create(db, "jwt_secret").await {
-        Ok(v) if !v.trim().is_empty() => Some(v.into_bytes()),
-        Ok(_) => None,
-        Err(e) => {
-            // Keep login working even if migrations haven't been applied yet.
-            worker::console_log!(
-                "Failed to read/create server_secrets.jwt_secret; falling back to opaque JWT: {e}"
-            );
-            None
-        }
-    }
+async fn jwt_secret_from_db(db: &sea_orm::DatabaseConnection) -> std::result::Result<Vec<u8>, sea_orm::DbErr> {
+    let v = server_secret_get_or_create(db, "jwt_secret").await?;
+    Ok(v.trim().as_bytes().to_vec())
 }
 
 fn scope_to_vec(scope: &str) -> Vec<String> {
@@ -242,29 +217,6 @@ fn device_type_display(value: i32) -> &'static str {
     }
 }
 
-fn encode_opaque_jwt<T: Serialize>(claims: &T) -> Result<String> {
-    // Produce a JWT-shaped token (header.payload.signature) that clients can parse.
-    // Server-side auth still treats the token as an opaque bearer value.
-    // If JWT_SECRET is configured, we prefer a proper HS256 signature.
-    let header = serde_json::json!({
-        "alg": "HS256",
-        "typ": "JWT",
-    });
-    let header_json = serde_json::to_vec(&header)
-        .map_err(|e| worker::Error::RustError(format!("Failed to serialize JWT header: {e}")))?;
-    let claims_json = serde_json::to_vec(claims)
-        .map_err(|e| worker::Error::RustError(format!("Failed to serialize JWT claims: {e}")))?;
-
-    let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
-    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
-
-    // Random signature bytes to ensure uniqueness.
-    let sig = random_bytes(32);
-    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);
-
-    Ok(format!("{header_b64}.{claims_b64}.{sig_b64}"))
-}
-
 fn issue_login_access_token(
     req: &Request,
     env: &Env,
@@ -275,7 +227,7 @@ fn issue_login_access_token(
     scope: &str,
     expires_in: i64,
     now: i64,
-    jwt_secret: Option<&[u8]>,
+    jwt_secret: &[u8],
 ) -> Result<String> {
     let name = u
         .name
@@ -302,12 +254,8 @@ fn issue_login_access_token(
         amr: vec!["Application".to_string()],
     };
 
-    if let Some(secret) = jwt_secret {
-        jwt::encode_hs256(secret, &claims)
-            .map_err(|e| worker::Error::RustError(format!("Failed to encode login JWT: {e}")))
-    } else {
-        encode_opaque_jwt(&claims)
-    }
+    jwt::encode_hs256(jwt_secret, &claims)
+        .map_err(|e| worker::Error::RustError(format!("Failed to encode login JWT: {e}")))
 }
 
 pub async fn handle_connect_token(mut req: Request, env: &Env) -> Result<Response> {
@@ -411,32 +359,6 @@ fn register_verify_issuer(req: &Request, env: &Env) -> Result<String> {
     Ok(format!("{}|register_verify", base_url(req, env)?))
 }
 
-fn register_verify_jwt_secret(env: &Env) -> Option<Vec<u8>> {
-    env_string(env, "REGISTER_VERIFY_JWT_SECRET")
-        .or_else(|| env_string(env, "JWT_SECRET"))
-        .map(|s| s.trim().as_bytes().to_vec())
-        .filter(|b| !b.is_empty())
-}
-
-async fn register_verify_jwt_secret_or_db(
-    env: &Env,
-    db: &sea_orm::DatabaseConnection,
-) -> Option<Vec<u8>> {
-    if let Some(secret) = register_verify_jwt_secret(env) {
-        return Some(secret);
-    }
-
-    match server_secret_get_or_create(db, "jwt_secret").await {
-        Ok(v) if !v.trim().is_empty() => Some(v.into_bytes()),
-        Ok(_) => None,
-        Err(e) => {
-            worker::console_log!(
-                "Failed to read/create server_secrets.jwt_secret for register verification; falling back to DB token: {e}"
-            );
-            None
-        }
-    }
-}
 
 async fn enumeration_delay() {
     // Approximate Vaultwarden's mitigation (1s +/- 100ms) to reduce timing side-channels.
@@ -484,7 +406,16 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
     }
 
     let should_send_mail = brevo::brevo_is_configured(env) && parse_bool_env(env, "SIGNUPS_VERIFY");
-    let jwt_secret = register_verify_jwt_secret_or_db(env, &db).await;
+    let jwt_secret = match jwt_secret_from_db(&db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return internal_error_response(
+                &req,
+                "Failed to read/create server_secrets.jwt_secret",
+                &e,
+            );
+        }
+    };
 
     // If we're going to send mail, don't send it to already-registered accounts.
     if should_send_mail {
@@ -509,41 +440,19 @@ pub async fn handle_register_send_verification_email(mut req: Request, env: &Env
     }
 
     // Vaultwarden uses a JWT token for this flow.
-    // For backwards compatibility, we keep the older DB-backed opaque token path if a JWT secret is not configured.
     let now = now_ts();
-    let token = if let Some(ref secret) = jwt_secret {
-        let issuer = register_verify_issuer(&req, env)?;
-        let claims = RegisterVerifyClaims {
-            nbf: now,
-            exp: now + 30 * 60,
-            iss: issuer,
-            sub: email.clone(),
-            name: payload.name.clone(),
-            verified: should_send_mail,
-        };
-
-        jwt::encode_hs256(secret, &claims).map_err(|e| worker::Error::RustError(e.to_string()))?
-    } else {
-        // Store an opaque token (30 minutes, like Vaultwarden).
-        let token = crate::worker_wasm::util::hex_encode(&random_bytes(32));
-        let expires_at = now + 30 * 60;
-
-        let active = register_verification::ActiveModel {
-            id: Set(token.clone()),
-            email: Set(email.clone()),
-            name: Set(payload.name.clone()),
-            // Kept for compatibility; not currently used by the worker implementation.
-            verified: Set(should_send_mail),
-            created_at: Set(now),
-            expires_at: Set(expires_at),
-        };
-
-        if let Err(e) = active.insert(&db).await {
-            return internal_error_response(&req, "Failed to persist register verification token", &e);
-        }
-
-        token
+    let issuer = register_verify_issuer(&req, env)?;
+    let claims = RegisterVerifyClaims {
+        nbf: now,
+        exp: now + 30 * 60,
+        iss: issuer,
+        sub: email.clone(),
+        name: payload.name.clone(),
+        verified: should_send_mail,
     };
+
+    let token = jwt::encode_hs256(&jwt_secret, &claims)
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
     if should_send_mail {
         let base = base_url(&req, env)?;
@@ -598,95 +507,50 @@ pub async fn handle_register_finish(mut req: Request, env: &Env) -> Result<Respo
         );
     };
 
-    // Prefer Vaultwarden-compatible JWT validation when a secret is configured.
-    // Otherwise, fall back to the legacy DB-backed opaque token.
+    let jwt_secret = match jwt_secret_from_db(&db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return internal_error_response(
+                &req,
+                "Failed to read/create server_secrets.jwt_secret",
+                &e,
+            );
+        }
+    };
+
     let now = now_ts();
     let mut name_override: Option<String> = None;
 
-    if let Some(secret) = register_verify_jwt_secret_or_db(env, &db).await {
-        match jwt::decode_hs256::<RegisterVerifyClaims>(&secret, &token) {
-            Ok(claims) => {
-                let expected_iss = register_verify_issuer(&req, env)?;
-                let leeway: i64 = 30;
+    let claims = match jwt::decode_hs256::<RegisterVerifyClaims>(&jwt_secret, &token) {
+        Ok(c) => c,
+        Err(_) => return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim"),
+    };
 
-                if claims.iss != expected_iss {
-                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-                }
+    let expected_iss = register_verify_issuer(&req, env)?;
+    let leeway: i64 = 30;
 
-                if now + leeway < claims.nbf {
-                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-                }
-                if now - leeway > claims.exp {
-                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-                }
+    if claims.iss != expected_iss {
+        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+    }
+    if now + leeway < claims.nbf {
+        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+    }
+    if now - leeway > claims.exp {
+        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+    }
 
-                if claims.sub.to_lowercase() != email {
-                    return error_response(
-                        &req,
-                        400,
-                        "invalid_email_verification_token",
-                        "Email verification token does not match email",
-                    );
-                }
+    if claims.sub.to_lowercase() != email {
+        return error_response(
+            &req,
+            400,
+            "invalid_email_verification_token",
+            "Email verification token does not match email",
+        );
+    }
 
-                // Prefer explicit name from the finish payload; fall back to the name in the token.
-                if payload.name.is_none() {
-                    name_override = claims.name.clone();
-                }
-            }
-            Err(_) => {
-                // If the token isn't a valid JWT (or the secret changed), try the legacy DB-backed path.
-                let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
-                    .one(&db)
-                    .await
-                    .map_err(|e| worker::Error::RustError(e.to_string()))?
-                else {
-                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-                };
-
-                if rec.email.to_lowercase() != email {
-                    return error_response(
-                        &req,
-                        400,
-                        "invalid_email_verification_token",
-                        "Email verification token does not match email",
-                    );
-                }
-
-                if rec.expires_at <= now {
-                    return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-                }
-
-                if payload.name.is_none() {
-                    name_override = rec.name.clone();
-                }
-            }
-        }
-    } else {
-        let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
-            .one(&db)
-            .await
-            .map_err(|e| worker::Error::RustError(e.to_string()))?
-        else {
-            return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-        };
-
-        if rec.email.to_lowercase() != email {
-            return error_response(
-                &req,
-                400,
-                "invalid_email_verification_token",
-                "Email verification token does not match email",
-            );
-        }
-
-        if rec.expires_at <= now {
-            return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
-        }
-
-        if payload.name.is_none() {
-            name_override = rec.name.clone();
-        }
+    // Prefer explicit name from the finish payload; fall back to the name in the token.
+    if payload.name.is_none() {
+        name_override = claims.name.clone();
     }
 
     accounts::register_with_db(&req, &db, payload, name_override).await
@@ -754,7 +618,16 @@ async fn password_grant(
     let device_type = device_type_str.parse::<i32>().unwrap_or(14);
     let now = now_ts();
 
-    let jwt_secret = login_jwt_secret_or_db(env, db).await;
+    let jwt_secret = match jwt_secret_from_db(db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return internal_error_response(
+                req,
+                "Failed to read/create server_secrets.jwt_secret",
+                &e,
+            );
+        }
+    };
 
     // Find or create device.
     let existing_device = device::Entity::find_by_id(device_identifier.clone())
@@ -806,7 +679,7 @@ async fn password_grant(
         &scope,
         expires_in,
         now,
-        jwt_secret.as_deref(),
+        &jwt_secret,
     )?;
     dev_active.access_token = Set(Some(access_token.clone()));
     dev_active.access_token_expires_at = Set(Some(now + expires_in));
@@ -867,7 +740,16 @@ async fn refresh_grant(
     let now = now_ts();
     let expires_in: i64 = 3600;
 
-    let jwt_secret = login_jwt_secret_or_db(env, db).await;
+    let jwt_secret = match jwt_secret_from_db(db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return internal_error_response(
+                req,
+                "Failed to read/create server_secrets.jwt_secret",
+                &e,
+            );
+        }
+    };
 
     let new_refresh_token = generate_refresh_token();
     // Scope is not included in refresh requests by some clients. Keep the canonical one.
@@ -883,7 +765,7 @@ async fn refresh_grant(
         &scope,
         expires_in,
         now,
-        jwt_secret.as_deref(),
+        &jwt_secret,
     )?;
 
     let mut active: device::ActiveModel = dev.into();

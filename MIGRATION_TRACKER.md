@@ -49,9 +49,9 @@
 | 0.2 | Add `wrangler.jsonc` (Pages proxy) |  | Pages deploy works; requests proxy to Worker | IP |
 | 0.3 | Create `crates/beaconwarden-worker` (wasm runtime) | 0.1 | `/health` returns JSON 200 | DONE |
 | 0.4 | Create `crates/entity` + `crates/migration` | 0.3 | Worker can run `Migrator::up` | DONE |
-| 0.5 | Add `.github/workflows/deploy-cloudflare-worker.yml` | 0.1–0.4 | API deploy + migrations in CI | NS |
-| 0.6 | Add `.github/workflows/deploy-cloudflare-pages.yml` | 0.2 | Pages deploy in CI | NS |
-| 0.7 | Add `AGENTS.md` guidance for agents |  | Clear conventions + Do/Don’t list | IP |
+| 0.5 | Add `.github/workflows/deploy-cloudflare-worker.yml` | 0.1–0.4 | API deploy + migrations in CI | IP |
+| 0.6 | Add `.github/workflows/deploy-cloudflare-pages.yml` | 0.2 | Pages deploy in CI | IP |
+| 0.7 | Add `AGENTS.md` guidance for agents |  | Clear conventions + Do/Don’t list | DONE |
 
 ### 1. Database model & migrations
 
@@ -80,7 +80,7 @@
 |---:|---|---|---|:---:|
 | 3.1 | Implement `/identity/connect/token` (password grant) | 1.2 | Desktop/mobile can login | DONE |
 | 3.2 | Implement refresh token flow | 3.1 | Refresh works across restarts | DONE |
-| 3.3 | Implement device registration & push token ignore | 3.1 | Devices show in clients | IP |
+| 3.3 | Implement device registration & push token ignore | 3.1 | Devices show in clients | DONE |
 | 3.4 | Implement 2FA baseline (TOTP) | 3.1 | TOTP login works | NS |
 | 3.5 | Disable/omit websocket notifications explicitly | 0.3 | Clients do not hang on notifications | DONE |
 
@@ -127,7 +127,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | `api/identity` | `/identity/*` | Critical | IP |
 | `api/core/accounts` | `/api/accounts/*` | Signup, profile, keys | IP |
 | `api/core/ciphers` | `/api/ciphers/*`, `/api/sync` | Critical | IP |
-| `api/core/folders` | `/api/folders/*` |  | NS |
+| `api/core/folders` | `/api/folders/*` |  | DONE |
 | `api/core/organizations` | `/api/organizations/*` |  | NS |
 | `api/core/events` | `/api/events/*` | Optional; can be stubbed | NS |
 | `api/core/emergency_access` | `/api/emergency-access/*` | Likely stateful; may be reduced | NS |
@@ -181,15 +181,3 @@ This table lists what the **Cloudflare Worker** currently serves.
 1. **DB schema choice**: The safest compatibility strategy is to keep API contracts identical and migrate data from existing Vaultwarden schema into a new libSQL schema that preserves the semantics.
 2. **Workers limitations**: no raw TCP, limited request body sizes, limited per-request CPU. Prefer streaming + direct-to-R2 uploads.
 3. **Crypto parity**: some vault operations are client-side, but server must preserve the exact fields and semantics.
-
-### Progress log
-
-- 2026-01-29: Implemented Bitwarden-compatible `GET /api/config` in the Worker.
-- 2026-01-29: Implemented identity registration email verification flow:
-	- `POST /identity/accounts/register/send-verification-email`
-	- `POST /identity/accounts/register/finish`
-	- Added `register_verifications` table (SeaORM migration + entity) to store opaque signup tokens.
-	- Added Brevo HTTP API integration for transactional emails.
-- 2026-01-29: Fixed libSQL schema mismatch by renaming `users.a_key` to `users.akey` via additive migration (prevents "no such column: users.akey" errors).
-- 2026-01-29: Added `server_secrets` table to persist server-level secrets (e.g., JWT signing secret) in libSQL so Cloudflare Workers can remain stateless without requiring `JWT_SECRET`.
-- 2026-01-29: Switched newly-created `users.id` values to UUIDv4 format (Bitwarden/Vaultwarden-compatible; avoids clients rejecting the user id).
