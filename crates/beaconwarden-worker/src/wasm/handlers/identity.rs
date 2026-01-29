@@ -1,13 +1,18 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::Value;
-use worker::{Env, FormData, Method, Request, Response, Result};
+use worker::{Env, FormData, Method, Request, Response, Result, Url};
+use std::time::Duration;
 
 use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::util::{generate_access_token, generate_refresh_token, now_ts, random_bytes};
+use crate::worker_wasm::{brevo, env::env_string};
 
 use entity::{device, user};
+use entity::{register_verification, register_verification::Entity as RegisterVerificationEntity};
+
+use super::accounts;
 
 fn form_get_string(form: &FormData, key: &str) -> Option<String> {
     form.get(key).and_then(|v| match v {
@@ -121,6 +126,224 @@ pub async fn handle_connect_token(mut req: Request, env: &Env) -> Result<Respons
         "refresh_token" => refresh_grant(&req, env, &db, &form).await,
         _ => oauth_error(&req, 400, "invalid_request", "Invalid grant_type"),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterVerificationData {
+    email: String,
+    name: Option<String>,
+    // receiveMarketingEmails: bool, // ignored
+}
+
+fn parse_bool_env(env: &Env, key: &str) -> bool {
+    match env_string(env, key)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "yes" | "on" => true,
+        _ => false,
+    }
+}
+
+fn base_url(req: &Request, env: &Env) -> Result<String> {
+    if let Some(v) = env_string(env, "BASE_URL") {
+        return Ok(v.trim_end_matches('/').to_string());
+    }
+
+    let url = req.url()?;
+    let scheme = url.scheme();
+    let host = url.host_str().unwrap_or_default();
+    let port = url.port();
+
+    if host.is_empty() {
+        return Ok(String::new());
+    }
+
+    let origin = match port {
+        Some(p) => format!("{scheme}://{host}:{p}"),
+        None => format!("{scheme}://{host}"),
+    };
+
+    Ok(origin.trim_end_matches('/').to_string())
+}
+
+fn build_finish_signup_url(base: &str, email: &str, token: &str) -> Result<String> {
+    // Build query string with correct URL encoding.
+    let mut query = Url::parse("https://query.builder").map_err(|e| {
+        worker::Error::RustError(format!("Failed to construct query builder URL: {e}"))
+    })?;
+    query.query_pairs_mut().append_pair("email", email).append_pair("token", token);
+    let query_string = query.query().unwrap_or_default();
+    Ok(format!("{base}/#/finish-signup/?{query_string}"))
+}
+
+async fn enumeration_delay() {
+    // Approximate Vaultwarden's mitigation (1s +/- 100ms) to reduce timing side-channels.
+    // Best-effort: if Delay is unavailable in the runtime, we simply skip the delay.
+    let jitter = {
+        let b = random_bytes(2);
+        let raw = u16::from_le_bytes([b[0], b[1]]) as i32;
+        (raw % 201) - 100
+    };
+    let sleep_ms: i32 = 1_000 + jitter;
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        // `worker::Delay` maps to JS timers.
+        worker::Delay::from(Duration::from_millis(sleep_ms.max(0) as u64)).await;
+    }
+}
+
+pub async fn handle_register_send_verification_email(mut req: Request, env: &Env) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    if parse_bool_env(env, "DISABLE_USER_REGISTRATION") {
+        return error_response(
+            &req,
+            400,
+            "registration_not_allowed",
+            "Registration not allowed or user already exists",
+        );
+    }
+
+    let payload: RegisterVerificationData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in register/send-verification-email: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let email = payload.email.trim().to_lowercase();
+    if email.is_empty() {
+        return error_response(&req, 400, "invalid_email", "Email cannot be blank");
+    }
+
+    let should_send_mail = brevo::brevo_is_configured(env) && parse_bool_env(env, "SIGNUPS_VERIFY");
+
+    // If we're going to send mail, don't send it to already-registered accounts.
+    if should_send_mail {
+        let existing = user::Entity::find()
+            .filter(user::Column::Email.eq(&email))
+            .one(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        let registered = existing
+            .as_ref()
+            .and_then(|u| u.password_hash.as_ref())
+            .is_some_and(|h| !h.is_empty());
+
+        if registered {
+            enumeration_delay().await;
+            let resp = Response::empty()?.with_status(204);
+            return json_with_cors(&req, resp);
+        }
+    }
+
+    // Store an opaque token (30 minutes, like Vaultwarden).
+    let now = now_ts();
+    let token = crate::worker_wasm::util::hex_encode(&random_bytes(32));
+    let expires_at = now + 30 * 60;
+
+    let active = register_verification::ActiveModel {
+        id: Set(token.clone()),
+        email: Set(email.clone()),
+        name: Set(payload.name.clone()),
+        verified: Set(should_send_mail),
+        created_at: Set(now),
+        expires_at: Set(expires_at),
+    };
+
+    if let Err(e) = active.insert(&db).await {
+        return internal_error_response(&req, "Failed to persist register verification token", &e);
+    }
+
+    if should_send_mail {
+        let base = base_url(&req, env)?;
+        let finish_url = build_finish_signup_url(&base, &email, &token)?;
+
+        let subject = "Verify Your Email";
+        let html = Some(format!(
+            "<p>Verify this email address to finish creating your account:</p><p><a href=\"{finish_url}\">Verify Email Address Now</a></p><p>If you did not request this, you can safely ignore this email.</p>"
+        ));
+        let text = Some(format!(
+            "Verify this email address to finish creating your account:\n\n{finish_url}\n\nIf you did not request this, you can safely ignore this email."
+        ));
+
+        if let Err(e) = brevo::send_email(env, &email, payload.name.as_deref(), subject, html, text).await {
+            return internal_error_response(&req, "Failed to send Brevo verification email", &e);
+        }
+
+        let resp = Response::empty()?.with_status(204);
+        return json_with_cors(&req, resp);
+    }
+
+    // If email verification is not required (or mail isn't configured), return the token directly.
+    let resp = Response::from_json(&token)?;
+    json_with_cors(&req, resp)
+}
+
+pub async fn handle_register_finish(mut req: Request, env: &Env) -> Result<Response> {
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let payload: accounts::RegisterData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in register/finish: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let email = payload.email.trim().to_lowercase();
+    if email.is_empty() {
+        return error_response(&req, 400, "invalid_email", "Email cannot be blank");
+    }
+
+    let Some(token) = payload.email_verification_token.clone() else {
+        return error_response(
+            &req,
+            400,
+            "missing_email_verification_token",
+            "Registration is missing required parameters",
+        );
+    };
+
+    let Some(rec) = RegisterVerificationEntity::find_by_id(token.clone())
+        .one(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+    else {
+        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+    };
+
+    if rec.email.to_lowercase() != email {
+        return error_response(&req, 400, "invalid_email_verification_token", "Email verification token does not match email");
+    }
+
+    if rec.expires_at <= now_ts() {
+        return error_response(&req, 400, "invalid_email_verification_token", "Invalid claim");
+    }
+
+    // Prefer explicit name from the finish payload; fall back to the name stored with the token.
+    let name_override = if payload.name.is_some() { None } else { rec.name.clone() };
+
+    let resp = accounts::register_with_db(&req, &db, payload, name_override).await;
+    if resp.is_ok() {
+        // Best-effort: remove token so it can't be reused.
+        let _ = RegisterVerificationEntity::delete_by_id(rec.id).exec(&db).await;
+    }
+
+    resp
 }
 
 async fn password_grant(

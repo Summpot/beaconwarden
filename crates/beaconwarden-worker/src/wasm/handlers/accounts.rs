@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use worker::{Env, Request, Response, Result};
 
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
 use crate::worker_wasm::crypto;
 use crate::worker_wasm::db::db_connect;
@@ -70,8 +70,8 @@ struct KeysData {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RegisterData {
-    email: String,
+pub(crate) struct RegisterData {
+    pub(crate) email: String,
 
     #[serde(alias = "kdfType")]
     kdf: i32,
@@ -90,7 +90,10 @@ struct RegisterData {
     #[serde(rename = "masterPasswordHash")]
     master_password_hash: String,
 
-    name: Option<String>,
+    pub(crate) name: Option<String>,
+
+    // Used by the identity register/finish flow.
+    pub(crate) email_verification_token: Option<String>,
 }
 
 fn validate_kdf(data: &RegisterData) -> std::result::Result<(), &'static str> {
@@ -138,15 +141,24 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
         }
     };
 
+    register_with_db(&req, &db, payload, None).await
+}
+
+pub(crate) async fn register_with_db(
+    req: &Request,
+    db: &DatabaseConnection,
+    payload: RegisterData,
+    name_override: Option<String>,
+) -> Result<Response> {
     let email = payload.email.trim().to_lowercase();
     if email.is_empty() {
-        return error_response(&req, 400, "invalid_email", "Email cannot be blank");
+        return error_response(req, 400, "invalid_email", "Email cannot be blank");
     }
 
     if let Some(ref name) = payload.name {
         if name.len() > 50 {
             return error_response(
-                &req,
+                req,
                 400,
                 "invalid_name",
                 "The field Name must be a string with a maximum length of 50.",
@@ -155,12 +167,12 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     }
 
     if let Err(msg) = validate_kdf(&payload) {
-        return error_response(&req, 400, "invalid_kdf", msg);
+        return error_response(req, 400, "invalid_kdf", msg);
     }
 
     let existing = UserEntity::find()
         .filter(user::Column::Email.eq(&email))
-        .one(&db)
+        .one(db)
         .await
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
@@ -188,7 +200,13 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
         id: Set(id),
         email: Set(email.clone()),
         enabled: Set(true),
-        name: Set(payload.name.clone().or_else(|| Some(email.clone()))),
+        name: Set(
+            payload
+                .name
+                .clone()
+                .or(name_override)
+                .or_else(|| Some(email.clone())),
+        ),
         password_hash: Set(Some(pwd_hash)),
         salt: Set(Some(salt)),
         password_iterations: Set(server_iterations),
@@ -206,8 +224,8 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
 
     // Insert or update.
     // SeaORM's save requires primary key; it will do update if exists.
-    if let Err(e) = active.save(&db).await {
-        return internal_error_response(&req, "Failed to save user", &e);
+    if let Err(e) = active.save(db).await {
+        return internal_error_response(req, "Failed to save user", &e);
     }
 
     let resp = Response::from_json(&serde_json::json!({
@@ -215,5 +233,5 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
         "captchaBypassToken": "",
     }))?;
 
-    json_with_cors(&req, resp)
+    json_with_cors(req, resp)
 }

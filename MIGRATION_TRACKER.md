@@ -70,7 +70,7 @@
 
 | ID | Task | Depends on | Acceptance criteria | Status |
 |---:|---|---|---|:---:|
-| 2.1 | Define routing map for Bitwarden endpoints | 0.3 | Document lists all routes | NS |
+| 2.1 | Define routing map for Bitwarden endpoints | 0.3 | Document lists all routes | IP |
 | 2.2 | Implement common error format mapping | 0.3 | Clients understand failures (no generic 500) | IP |
 | 2.3 | Implement CORS + security headers parity | 0.3 | Web clients + extensions function | IP |
 
@@ -87,6 +87,39 @@
 ### 4. Core API surface (Bitwarden)
 
 > This list mirrors `src/api/*` modules from the current codebase. Implement in Worker routing.
+
+#### Endpoint inventory (completeness)
+
+Historically this tracker did **not** enumerate individual endpoints, which is why things like `/api/config` were not explicitly mentioned before.
+
+To prevent omissions, treat the legacy Rocket codebase under `src/api/**` as the canonical inventory of Vaultwarden-style endpoints.
+We maintain a deterministic extractor script and commit the extracted output:
+
+- `tools/extract_rocket_endpoints.py`
+- `docs/Vaultwarden_API_Endpoints_Extracted.md`
+
+This script lists endpoints as **route attributes** (e.g. `#[get("/config")]`) which are typically mounted under `/api`, `/identity`, `/notifications`, etc.
+
+#### Workers routing map (authoritative for current deployment)
+
+This table lists what the **Cloudflare Worker** currently serves.
+
+| Method | Path | Purpose | Status |
+|---|---|---|:---:|
+| GET | `/health` | Health check | DONE |
+| GET | `/api/config` | Bitwarden config | DONE |
+| POST | `/api/accounts/prelogin` | KDF negotiation | DONE |
+| POST | `/api/accounts/register` | Registration (legacy path) | DONE |
+| POST | `/identity/connect/token` | Login/refresh token | DONE |
+| GET | `/api/sync` | Sync response | DONE |
+| POST | `/identity/accounts/prelogin` | Alias to `/api/accounts/prelogin` | DONE |
+| POST | `/identity/accounts/register` | Alias to `/api/accounts/register` | DONE |
+| POST | `/identity/accounts/register/send-verification-email` | Signup email verification | DONE |
+| POST | `/identity/accounts/register/finish` | Finish signup with token | DONE |
+| POST | `/v1/admin/migrations/up` | Apply SeaORM migrations | DONE |
+| GET | `/v1/admin/db/ping` | DB connectivity check | DONE |
+| * | `/notifications/*` | Explicitly disabled | DONE |
+| * | `/push/*` | Explicitly disabled | DONE |
 
 | Module | Key endpoints | Notes | Status |
 |---|---|---|:---:|
@@ -148,3 +181,12 @@
 1. **DB schema choice**: The safest compatibility strategy is to keep API contracts identical and migrate data from existing Vaultwarden schema into a new libSQL schema that preserves the semantics.
 2. **Workers limitations**: no raw TCP, limited request body sizes, limited per-request CPU. Prefer streaming + direct-to-R2 uploads.
 3. **Crypto parity**: some vault operations are client-side, but server must preserve the exact fields and semantics.
+
+### Progress log
+
+- 2026-01-29: Implemented Bitwarden-compatible `GET /api/config` in the Worker.
+- 2026-01-29: Implemented identity registration email verification flow:
+	- `POST /identity/accounts/register/send-verification-email`
+	- `POST /identity/accounts/register/finish`
+	- Added `register_verifications` table (SeaORM migration + entity) to store opaque signup tokens.
+	- Added Brevo HTTP API integration for transactional emails.

@@ -268,15 +268,33 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           BASE_URL: ${{ steps.cfg.outputs.resolved_base_url }}
           LIBSQL_URL: ${{ steps.cfg.outputs.libsql_url }}
+          SIGNUPS_VERIFY: ${{ secrets.CLOUDFLARE_WORKER_SIGNUPS_VERIFY || 'false' }}
+          DISABLE_USER_REGISTRATION: ${{ secrets.CLOUDFLARE_WORKER_DISABLE_USER_REGISTRATION || 'false' }}
+          BREVO_SENDER_EMAIL: ${{ secrets.CLOUDFLARE_WORKER_BREVO_SENDER_EMAIL }}
+          BREVO_SENDER_NAME: ${{ secrets.CLOUDFLARE_WORKER_BREVO_SENDER_NAME }}
           WRANGLER_WORKERS_CONFIG: ${{ steps.cfg.outputs.wrangler_workers_config }}
         shell: bash
         run: |
           set -euo pipefail
 
-          wrangler deploy --config "${WRANGLER_WORKERS_CONFIG}" \
-            --var "BASE_URL:${BASE_URL}" \
-            --var "LIBSQL_URL:${LIBSQL_URL}" \
-            --var "CLOUDFLARE_ACCOUNT_ID:${CLOUDFLARE_ACCOUNT_ID}"
+          args=(wrangler deploy --config "${WRANGLER_WORKERS_CONFIG}")
+          args+=(--var "BASE_URL:${BASE_URL}")
+          args+=(--var "LIBSQL_URL:${LIBSQL_URL}")
+          args+=(--var "CLOUDFLARE_ACCOUNT_ID:${CLOUDFLARE_ACCOUNT_ID}")
+
+          # Registration flags
+          args+=(--var "SIGNUPS_VERIFY:${SIGNUPS_VERIFY}")
+          args+=(--var "DISABLE_USER_REGISTRATION:${DISABLE_USER_REGISTRATION}")
+
+          # Optional: Brevo sender metadata (non-secret)
+          if [ -n "${BREVO_SENDER_EMAIL:-}" ]; then
+            args+=(--var "BREVO_SENDER_EMAIL:${BREVO_SENDER_EMAIL}")
+          fi
+          if [ -n "${BREVO_SENDER_NAME:-}" ]; then
+            args+=(--var "BREVO_SENDER_NAME:${BREVO_SENDER_NAME}")
+          fi
+
+          "${args[@]}"
 
       - name: Set Worker secrets
         env:
@@ -284,6 +302,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           LIBSQL_AUTH_TOKEN: ${{ steps.turso.outputs.turso_auth_token || secrets.CLOUDFLARE_WORKER_LIBSQL_AUTH_TOKEN }}
           MIGRATIONS_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_MIGRATIONS_TOKEN }}
+          BREVO_API_KEY: ${{ secrets.CLOUDFLARE_WORKER_BREVO_API_KEY || secrets.BREVO_API_KEY }}
           WRANGLER_WORKERS_CONFIG: ${{ steps.cfg.outputs.wrangler_workers_config }}
         shell: bash
         run: |
@@ -298,6 +317,12 @@ jobs:
 
           if [ -n "${MIGRATIONS_TOKEN:-}" ]; then
             printf '%s' "$MIGRATIONS_TOKEN" | wrangler secret put MIGRATIONS_TOKEN --config "${WRANGLER_WORKERS_CONFIG}"
+          fi
+
+          # Optional: Brevo transactional email.
+          # The Worker reads BREVO_API_KEY as a secret; sender metadata is configured via vars.
+          if [ -n "${BREVO_API_KEY:-}" ]; then
+            printf '%s' "$BREVO_API_KEY" | wrangler secret put BREVO_API_KEY --config "${WRANGLER_WORKERS_CONFIG}"
           fi
 
       - name: Apply SeaORM migrations (Migrator::up)

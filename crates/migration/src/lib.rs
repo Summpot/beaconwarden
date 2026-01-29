@@ -3,6 +3,7 @@ pub use sea_orm_migration::prelude::*;
 mod m20260128_000001_init;
 mod m20260128_000002_core_tables;
 mod m20260128_000003_auth_fields;
+mod m20260129_000004_register_verifications;
 
 pub struct Migrator;
 
@@ -14,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260128_000001_init::Migration),
             Box::new(m20260128_000002_core_tables::Migration),
             Box::new(m20260128_000003_auth_fields::Migration),
+            Box::new(m20260129_000004_register_verifications::Migration),
         ]
     }
 }

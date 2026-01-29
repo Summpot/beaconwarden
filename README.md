@@ -57,6 +57,31 @@ The included workflows will:
 | `CLOUDFLARE_MIGRATIONS_API_TOKEN` | Separate Cloudflare token for running migrations (if your main token is IP-restricted) |
 | `CLOUDFLARE_WORKER_MIGRATIONS_TOKEN` | Static token for the migration endpoint (optional) |
 
+### Worker configuration (set via GitHub Actions)
+
+This repo is designed so that most Worker configuration can be injected at deploy time by the GitHub Actions workflow,
+so fork users do **not** need to edit `wrangler.workers.jsonc`.
+
+| Secret | Purpose |
+|---|---|
+| `CLOUDFLARE_WORKER_SIGNUPS_VERIFY` | Set to `true` to require email verification during signup (requires Brevo configuration to actually send mail) |
+| `CLOUDFLARE_WORKER_DISABLE_USER_REGISTRATION` | Set to `true` to disable self-registration |
+| `CLOUDFLARE_WORKER_BREVO_SENDER_EMAIL` | Sender email address used in outgoing Brevo emails |
+| `CLOUDFLARE_WORKER_BREVO_SENDER_NAME` | Sender display name (optional) |
+
+### Email (Brevo) secrets (optional)
+
+If configured, the Worker can send signup verification emails via Brevo.
+
+| Secret | Purpose |
+|---|---|
+| `CLOUDFLARE_WORKER_BREVO_API_KEY` | Brevo API key used to send transactional emails |
+
+> Notes:
+>
+> - `BREVO_API_KEY` is stored as a **Worker secret**.
+> - Sender settings (`BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`) and registration flags (`SIGNUPS_VERIFY`) are **Worker vars** (see `wrangler.workers.jsonc`).
+
 ## Notes
 
 - This project is **experimental** and under active migration. For engineering progress, see `MIGRATION_TRACKER.md`.

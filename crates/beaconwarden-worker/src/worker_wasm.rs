@@ -4,6 +4,8 @@ use worker::*;
 pub mod db;
 #[path = "wasm/crypto.rs"]
 pub mod crypto;
+#[path = "wasm/brevo.rs"]
+pub mod brevo;
 #[path = "wasm/env.rs"]
 pub mod env;
 #[path = "wasm/handlers/mod.rs"]
@@ -62,8 +64,25 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Post && path == "/api/accounts/register" {
         return handlers::accounts::handle_register(req, &env).await;
     }
+    if req.method() == Method::Get && path == "/api/config" {
+        return handlers::config::handle_config(req, &env).await;
+    }
     if req.method() == Method::Post && path == "/identity/connect/token" {
         return handlers::identity::handle_connect_token(req, &env).await;
+    }
+
+    // Identity registration flow (used by newer Bitwarden clients).
+    if req.method() == Method::Post && path == "/identity/accounts/prelogin" {
+        return handlers::accounts::handle_prelogin(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/identity/accounts/register" {
+        return handlers::accounts::handle_register(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/identity/accounts/register/send-verification-email" {
+        return handlers::identity::handle_register_send_verification_email(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/identity/accounts/register/finish" {
+        return handlers::identity::handle_register_finish(req, &env).await;
     }
     if req.method() == Method::Get && path == "/api/sync" {
         return handlers::sync::handle_sync(req, &env).await;

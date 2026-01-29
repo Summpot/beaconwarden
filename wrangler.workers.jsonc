@@ -19,10 +19,7 @@
       "fallthrough": false
     }
   ],
-  "vars": {
-    "LIBSQL_URL": "",
-    "BASE_URL": "https://beaconwarden.pages.dev"
-  },
+  "vars": {},
   "r2_buckets": [
     {
       "binding": "ATTACHMENTS",
