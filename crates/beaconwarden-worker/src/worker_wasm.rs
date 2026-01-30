@@ -10,6 +10,8 @@ pub mod brevo;
 pub mod env;
 #[path = "wasm/handlers/mod.rs"]
 pub mod handlers;
+#[path = "wasm/domains.rs"]
+pub mod domains;
 #[path = "wasm/http.rs"]
 pub mod http;
 #[path = "wasm/jwt.rs"]
@@ -123,6 +125,11 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Get && path == "/api/config" {
         return handlers::config::handle_config(req, &env).await;
     }
+
+    // Domains settings (sync settings).
+    if path == "/api/settings/domains" {
+        return handlers::settings::handle_settings_domains(req, &env).await;
+    }
     if req.method() == Method::Post && path == "/identity/connect/token" {
         return handlers::identity::handle_connect_token(req, &env).await;
     }
@@ -140,6 +147,17 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Ciphers.
     if req.method() == Method::Post && path == "/api/ciphers/import" {
         return handlers::ciphers::handle_ciphers_import(req, &env).await;
+    }
+
+    // Bulk cipher operations must be routed before the "/api/ciphers/<id>" prefix handler.
+    if path == "/api/ciphers/delete" {
+        return handlers::ciphers::handle_ciphers_delete(req, &env).await;
+    }
+    if path == "/api/ciphers/restore" {
+        return handlers::ciphers::handle_ciphers_restore(req, &env).await;
+    }
+    if path == "/api/ciphers/move" {
+        return handlers::ciphers::handle_ciphers_move(req, &env).await;
     }
     if path == "/api/ciphers" || path == "/api/ciphers/create" {
         return handlers::ciphers::handle_ciphers(req, &env).await;

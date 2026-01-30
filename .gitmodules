@@ -1,0 +1,6 @@
+[submodule "third_party/bw_web_builds"]
+	path = third_party/bw_web_builds
+	url = https://github.com/dani-garcia/bw_web_builds
+[submodule "third_party/vaultwarden_src"]
+	path = third_party/vaultwarden_src
+	url = https://github.com/dani-garcia/vaultwarden

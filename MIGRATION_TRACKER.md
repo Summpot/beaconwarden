@@ -59,11 +59,11 @@
 
 | ID | Task | Depends on | Acceptance criteria | Status |
 |---:|---|---|---|:---:|
-| 1.1 | Decide schema strategy (match Vaultwarden tables vs new schema) |  | Documented mapping rules | NS |
+| 1.1 | Decide schema strategy (match Vaultwarden tables vs new schema) |  | Documented mapping rules | DONE |
 | 1.2 | Implement core tables: users, devices, ciphers, folders | 1.1 | Sync can persist + read back | IP |
-| 1.3 | Implement org tables: organizations, collections, memberships | 1.2 | Org sharing works | NS |
-| 1.4 | Implement sends tables | 1.2 | Send create/read/delete works | NS |
-| 1.5 | Implement attachments tables | 1.2 | Attachment metadata persisted | NS |
+| 1.3 | Implement org tables: organizations, collections, memberships | 1.2 | Org sharing works | IP |
+| 1.4 | Implement sends tables | 1.2 | Send create/read/delete works | IP |
+| 1.5 | Implement attachments tables | 1.2 | Attachment metadata persisted | IP |
 | 1.6 | Add indexes for sync performance | 1.2–1.5 | Acceptable sync latency | NS |
 
 ### 2. Request/response compatibility layer
@@ -113,6 +113,34 @@ This table lists what the **Cloudflare Worker** currently serves.
 | POST | `/identity/connect/token` | Login/refresh token | DONE |
 | GET | `/api/sync` | Sync response | DONE |
 | POST | `/api/ciphers/import` | Bulk cipher import (Bitwarden JSON) | DONE |
+| GET | `/api/settings/domains` | Equivalent domains settings (read) | DONE |
+| POST | `/api/settings/domains` | Equivalent domains settings (update) | DONE |
+| PUT | `/api/settings/domains` | Equivalent domains settings (update) | DONE |
+| GET | `/api/folders` | List folders | DONE |
+| POST | `/api/folders` | Create folder | DONE |
+| GET | `/api/folders/<id>` | Get folder | DONE |
+| PUT | `/api/folders/<id>` | Update folder | DONE |
+| POST | `/api/folders/<id>` | Update folder (compat alias) | DONE |
+| DELETE | `/api/folders/<id>` | Delete folder | DONE |
+| POST | `/api/folders/<id>/delete` | Delete folder (compat alias) | DONE |
+| GET | `/api/ciphers` | List ciphers | DONE |
+| POST | `/api/ciphers` | Create cipher | DONE |
+| DELETE | `/api/ciphers` | Bulk cipher hard delete | DONE |
+| GET | `/api/ciphers/<id>` | Get cipher | DONE |
+| GET | `/api/ciphers/<id>/details` | Get cipher details (compat alias) | DONE |
+| PUT | `/api/ciphers/<id>` | Update cipher | DONE |
+| POST | `/api/ciphers/<id>` | Update cipher (compat alias) | DONE |
+| DELETE | `/api/ciphers/<id>` | Hard delete cipher | DONE |
+| PUT | `/api/ciphers/<id>/partial` | Update folder/favorite only | DONE |
+| POST | `/api/ciphers/<id>/partial` | Update folder/favorite (compat alias) | DONE |
+| PUT | `/api/ciphers/<id>/delete` | Soft delete cipher | DONE |
+| POST | `/api/ciphers/<id>/delete` | Hard delete cipher | DONE |
+| PUT | `/api/ciphers/<id>/restore` | Restore soft-deleted cipher | DONE |
+| POST | `/api/ciphers/delete` | Bulk cipher hard delete | DONE |
+| PUT | `/api/ciphers/delete` | Bulk cipher soft delete | DONE |
+| PUT | `/api/ciphers/restore` | Bulk cipher restore | DONE |
+| POST | `/api/ciphers/move` | Bulk move ciphers to folder | DONE |
+| PUT | `/api/ciphers/move` | Bulk move ciphers (compat alias) | DONE |
 | POST | `/identity/accounts/prelogin` | Alias to `/api/accounts/prelogin` | DONE |
 | POST | `/identity/accounts/register` | Alias to `/api/accounts/register` | DONE |
 | POST | `/identity/accounts/register/send-verification-email` | Signup email verification | DONE |

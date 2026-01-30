@@ -1,15 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::Value;
 use worker::{Env, Request, Response, Result, Url};
 
 use crate::worker_wasm::db::db_connect;
+use crate::worker_wasm::domains::domains_json_for_user;
 use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{internal_error_response, json_with_cors};
 use crate::worker_wasm::util::{normalize_user_id_for_client, ts_to_rfc3339};
 
-use entity::{cipher, folder, folder_cipher, user};
+use entity::{cipher, favorite, folder, folder_cipher, user};
 
 fn folder_json(f: &folder::Model) -> Value {
     serde_json::json!({
@@ -20,7 +21,7 @@ fn folder_json(f: &folder::Model) -> Value {
     })
 }
 
-fn cipher_json(c: &cipher::Model, folder_id: Option<String>) -> Value {
+fn cipher_json(c: &cipher::Model, folder_id: Option<String>, favorite: bool) -> Value {
     let mut obj: Value = serde_json::from_str(&c.data).unwrap_or_else(|_| serde_json::json!({}));
 
     obj["id"] = Value::String(c.id.clone());
@@ -31,6 +32,7 @@ fn cipher_json(c: &cipher::Model, folder_id: Option<String>) -> Value {
         None => Value::Null,
     };
     obj["folderId"] = folder_id.map(Value::String).unwrap_or(Value::Null);
+    obj["favorite"] = Value::Bool(favorite);
 
     if obj.get("object").and_then(|v| v.as_str()).is_none() {
         obj["object"] = Value::String("cipher".to_string());
@@ -106,7 +108,11 @@ pub async fn handle_sync(req: Request, env: &Env) -> Result<Response> {
     let url = req.url()?;
     let exclude_domains = parse_exclude_domains(&url);
 
-    let domains_json = if exclude_domains { Value::Null } else { Value::Null };
+    let domains_json = if exclude_domains {
+        Value::Null
+    } else {
+        domains_json_for_user(&u, true)
+    };
 
     let folders = folder::Entity::find()
         .filter(folder::Column::UserId.eq(u.id.clone()))
@@ -119,6 +125,15 @@ pub async fn handle_sync(req: Request, env: &Env) -> Result<Response> {
         .all(&db)
         .await
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let favorite_ids: HashSet<String> = favorite::Entity::find()
+        .filter(favorite::Column::UserId.eq(u.id.clone()))
+        .all(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .into_iter()
+        .map(|f| f.cipher_id)
+        .collect();
 
     let cipher_ids: Vec<String> = ciphers.iter().map(|c| c.id.clone()).collect();
     let folder_map: HashMap<String, String> = if cipher_ids.is_empty() {
@@ -144,7 +159,7 @@ pub async fn handle_sync(req: Request, env: &Env) -> Result<Response> {
         "policies": [],
         "ciphers": ciphers
             .iter()
-            .map(|c| cipher_json(c, folder_map.get(&c.id).cloned()))
+            .map(|c| cipher_json(c, folder_map.get(&c.id).cloned(), favorite_ids.contains(&c.id)))
             .collect::<Vec<_>>(),
         "domains": domains_json,
         "sends": [],
