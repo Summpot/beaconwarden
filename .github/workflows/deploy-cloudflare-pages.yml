@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - dist/**
+      - third_party/bw_web_builds
+      - third_party/bw_web_builds/**
+      - .gitmodules
       - package.json
       - wrangler.jsonc
       - wrangler.workers.jsonc
@@ -26,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup node
         uses: actions/setup-node@v6
@@ -34,6 +39,45 @@ jobs:
 
       - name: Install wrangler
         run: npm install wrangler -g
+
+      - name: Build Web Vault (bw_web_builds)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Building web-vault via third_party/bw_web_builds (container-extract)"
+
+          pushd third_party/bw_web_builds
+          make container-extract
+          popd
+
+      - name: Stage Pages dist (preserve _worker.js)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          worker_js="dist/_worker.js"
+          if [ ! -f "$worker_js" ]; then
+            echo "Expected '$worker_js' to exist (Pages Functions/Proxy entrypoint)." >&2
+            exit 1
+          fi
+
+          web_vault_dir="third_party/bw_web_builds/container_builds/web-vault"
+          if [ ! -d "$web_vault_dir" ]; then
+            echo "Expected web-vault output directory '$web_vault_dir' to exist." >&2
+            exit 1
+          fi
+
+          out_dir="dist_ci"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+
+          # 1) Copy the web-vault static site
+          #    (exclude any _worker.js shipped by upstream builds)
+          rsync -a --exclude "_worker.js" "$web_vault_dir"/ "$out_dir"/
+
+          # 2) Ensure our proxy worker is used (do not overwrite it during copy)
+          cp -p "$worker_js" "$out_dir/_worker.js"
 
       - name: Resolve deploy settings
         id: cfg
@@ -133,8 +177,8 @@ jobs:
           set -euo pipefail
 
           project="${PAGES_PROJECT:?PAGES_PROJECT is required}"
-          echo "Deploying Pages project '$project' from ./dist"
+          echo "Deploying Pages project '$project' from ./dist_ci"
 
-          wrangler pages deploy dist --project-name "$project" --branch "main" --experimental-provision --experimental-auto-create
+          wrangler pages deploy dist_ci --project-name "$project" --branch "main" --experimental-provision --experimental-auto-create
 
           echo "Pages URL: https://$project.pages.dev" >> "$GITHUB_STEP_SUMMARY"
