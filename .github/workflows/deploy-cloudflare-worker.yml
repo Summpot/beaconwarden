@@ -376,14 +376,33 @@ jobs:
           max_attempts=200
           for attempt in $(seq 1 "$max_attempts"); do
             echo "Applying migrations (attempt ${attempt}/${max_attempts})..."
-            resp=$(curl -sS --fail-with-body \
+            # Capture both body and HTTP status without letting `set -e` abort on 500.
+            set +e
+            result=$(curl -sS \
               -X POST "$url" \
               -H "Authorization: Bearer ${token}" \
               -H "Accept: application/json" \
               -H "Content-Type: application/json" \
-              --data '{}')
+              --data '{}' \
+              -w "\n%{http_code}")
+            curl_exit=$?
+            set -e
 
-            echo "$resp" | jq -C .
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "curl failed with exit code $curl_exit" >&2
+              echo "$result" >&2 || true
+              exit 1
+            fi
+
+            resp=$(echo "$result" | sed '$d')
+            http_code=$(echo "$result" | tail -n 1)
+
+            echo "$resp" | jq -C . || echo "$resp"
+
+            if [ "${http_code}" -ge 400 ]; then
+              echo "Migration endpoint returned HTTP ${http_code}." >&2
+              exit 1
+            fi
 
             done=$(echo "$resp" | jq -r '.migrations.done // false')
             pending=$(echo "$resp" | jq -r '.migrations.pending // 0')
