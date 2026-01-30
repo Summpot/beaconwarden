@@ -8,6 +8,10 @@ mod m20260129_000005_fix_users_akey_column;
 mod m20260129_000006_server_secrets;
 mod m20260130_000007_favorites_and_domains;
 mod m20260130_000008_more_entities;
+mod m20260130_000009_user_compat_columns;
+mod m20260130_000010_org_core_tables;
+mod m20260130_000011_groups_tables;
+mod m20260130_000012_misc_tables;
 
 pub struct Migrator;
 
@@ -24,6 +28,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260129_000006_server_secrets::Migration),
             Box::new(m20260130_000007_favorites_and_domains::Migration),
             Box::new(m20260130_000008_more_entities::Migration),
+            Box::new(m20260130_000009_user_compat_columns::Migration),
+            Box::new(m20260130_000010_org_core_tables::Migration),
+            Box::new(m20260130_000011_groups_tables::Migration),
+            Box::new(m20260130_000012_misc_tables::Migration),
         ]
     }
 }

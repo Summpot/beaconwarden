@@ -367,15 +367,39 @@ jobs:
             exit 1
           fi
 
-          url="https://${worker}.${subdomain}.workers.dev/v1/admin/migrations/up"
-          echo "Calling migration endpoint: $url"
+          url="https://${worker}.${subdomain}.workers.dev/v1/admin/migrations/up?steps=1"
+          echo "Calling migration endpoint (chunked): $url"
 
-          curl -sS --fail-with-body \
-            -X POST "$url" \
-            -H "Authorization: Bearer ${token}" \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/json" \
-            --data '{}' \
-            | jq -C .
+          # Apply migrations in multiple HTTP requests.
+          # Each SQL statement against libSQL/hrana is an outgoing subrequest from the Worker,
+          # and Workers enforce a strict per-request subrequest limit.
+          max_attempts=200
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "Applying migrations (attempt ${attempt}/${max_attempts})..."
+            resp=$(curl -sS --fail-with-body \
+              -X POST "$url" \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              --data '{}')
 
-          echo "Applied migrations via Migrator::up" >> "$GITHUB_STEP_SUMMARY"
+            echo "$resp" | jq -C .
+
+            done=$(echo "$resp" | jq -r '.migrations.done // false')
+            pending=$(echo "$resp" | jq -r '.migrations.pending // 0')
+            next=$(echo "$resp" | jq -r '.migrations.next // empty')
+
+            if [ "$done" = "true" ] || [ "$pending" = "0" ]; then
+              echo "All migrations applied.";
+              break
+            fi
+
+            echo "Pending migrations: $pending (next: ${next})"
+          done
+
+          if [ "$done" != "true" ] && [ "$pending" != "0" ]; then
+            echo "Migrations did not finish after ${max_attempts} attempts (pending=${pending}, next=${next})." >&2
+            exit 1
+          fi
+
+          echo "Applied migrations via Migrator::up (chunked)" >> "$GITHUB_STEP_SUMMARY"
