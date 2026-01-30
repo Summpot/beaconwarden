@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, NaiveDateTime};
-use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set, Statement, Value as SeaValue};
 use serde_json::Value;
 use worker::{Env, Method, Request, Response, Result};
 
@@ -281,7 +281,10 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
     }
 
     // Create or reuse folders.
-    // IMPORTANT: In Workers + libSQL(Hrana), each DB query is a subrequest. Keep this path query-light.
+    // IMPORTANT: Cloudflare Workers enforce a hard limit on outgoing subrequests.
+    // With libSQL(Hrana), each DB roundtrip is a subrequest. This endpoint must
+    // keep the number of DB calls *constant* (or near-constant) regardless of
+    // the number of imported ciphers.
     let existing_folder_ids: HashSet<String> = folder::Entity::find()
         .filter(folder::Column::UserId.eq(auth.user.id.clone()))
         .all(&db)
@@ -291,11 +294,8 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
         .map(|f| f.id)
         .collect();
 
-    // Batch insert new folders to avoid one-query-per-folder.
-    const FOLDER_INSERT_CHUNK: usize = 150;
-    let mut folders_to_insert: Vec<folder::ActiveModel> = Vec::new();
-
     let mut folder_ids: Vec<String> = Vec::with_capacity(payload.folders.len());
+    let mut folders_to_insert: Vec<Value> = Vec::new();
     let now_folders = now_ts();
     for f in payload.folders {
         // Vaultwarden behavior: only reuse a folder if it already exists for this user.
@@ -306,27 +306,15 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
         }
 
         let folder_id = uuid_v4();
-        folders_to_insert.push(folder::ActiveModel {
-            id: Set(folder_id.clone()),
-            user_id: Set(auth.user.id.clone()),
-            name: Set(f.name.trim().to_string()),
-            created_at: Set(now_folders),
-            updated_at: Set(now_folders),
-        });
-        folder_ids.push(folder_id);
-    }
-
-    fn drain_up_to<T>(v: &mut Vec<T>, max: usize) -> Vec<T> {
-        let take = v.len().min(max);
-        v.drain(..take).collect()
-    }
-
-    while !folders_to_insert.is_empty() {
-        let batch = drain_up_to(&mut folders_to_insert, FOLDER_INSERT_CHUNK);
-        folder::Entity::insert_many(batch)
-            .exec(&db)
-            .await
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+        folder_ids.push(folder_id.clone());
+        folders_to_insert.push(serde_json::json!({
+            "id": folder_id,
+            "user_id": auth.user.id.clone(),
+            "name": f.name.trim(),
+            "created_at": now_folders,
+            "updated_at": now_folders,
+        }));
+        // folder_ids is aligned with the import folder index.
     }
 
     // Build cipher-index -> folder-id map.
@@ -336,14 +324,11 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
     }
 
     // Create ciphers.
-    // Avoid per-cipher queries (favorites/folder validation/deletes) to stay under Workers subrequest limits.
-    const CIPHER_INSERT_CHUNK: usize = 25;
-    const FAVORITE_INSERT_CHUNK: usize = 400;
-    const FOLDER_CIPHER_INSERT_CHUNK: usize = 400;
-
-    let mut ciphers_to_insert: Vec<cipher::ActiveModel> = Vec::with_capacity(payload.ciphers.len());
-    let mut favorites_to_insert: Vec<favorite::ActiveModel> = Vec::new();
-    let mut folder_ciphers_to_insert: Vec<folder_cipher::ActiveModel> = Vec::new();
+    // Use JSON-table inserts so the DB roundtrip count is independent of item count.
+    let mut ciphers_to_insert: Vec<Value> = Vec::with_capacity(payload.ciphers.len());
+    let mut favorites_to_insert: Vec<Value> = Vec::new();
+    let mut folder_ciphers_to_insert: Vec<Value> = Vec::new();
+    let now_ciphers = now_ts();
 
     for (idx, cipher_payload) in payload.ciphers.into_iter().enumerate() {
         let name = value_get_string(&cipher_payload, "name").unwrap_or_default();
@@ -352,69 +337,138 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
 
         // Always create new ids during import, matching Vaultwarden.
         let id = uuid_v4();
-        let now = now_ts();
 
         let folder_id = relations_map
             .get(&idx)
             .and_then(|folder_idx| folder_ids.get(*folder_idx))
             .cloned();
 
-        ciphers_to_insert.push(cipher::ActiveModel {
-            id: Set(id.clone()),
-            created_at: Set(now),
-            updated_at: Set(now),
-            user_id: Set(Some(auth.user.id.clone())),
-            organization_id: Set(value_get_string(&cipher_payload, "organizationId")),
-            key: Set(value_get_string(&cipher_payload, "key")),
-            r#type: Set(cipher_type),
-            name: Set(name),
-            notes: Set(value_get_string(&cipher_payload, "notes")),
-            fields: Set(cipher_payload.get("fields").map(|v| v.to_string())),
-            data: Set(cipher_payload.to_string()),
-            password_history: Set(cipher_payload.get("passwordHistory").map(|v| v.to_string())),
-            deleted_at: Set(None),
-            reprompt: Set(value_get_i32(&cipher_payload, "reprompt")),
-        });
+        ciphers_to_insert.push(serde_json::json!({
+            "id": id.clone(),
+            "created_at": now_ciphers,
+            "updated_at": now_ciphers,
+            "user_id": auth.user.id.clone(),
+            "organization_id": value_get_string(&cipher_payload, "organizationId"),
+            "key": value_get_string(&cipher_payload, "key"),
+            "type": cipher_type,
+            "name": name,
+            "notes": value_get_string(&cipher_payload, "notes"),
+            "fields": cipher_payload.get("fields").map(|v| v.to_string()),
+            "data": cipher_payload.to_string(),
+            "password_history": cipher_payload.get("passwordHistory").map(|v| v.to_string()),
+            "deleted_at": Value::Null,
+            "reprompt": value_get_i32(&cipher_payload, "reprompt"),
+        }));
 
         if want_favorite {
-            favorites_to_insert.push(favorite::ActiveModel {
-                user_id: Set(auth.user.id.clone()),
-                cipher_id: Set(id.clone()),
-            });
+            favorites_to_insert.push(serde_json::json!({
+                "user_id": auth.user.id.clone(),
+                "cipher_id": id.clone(),
+            }));
         }
 
         if let Some(folder_id) = folder_id {
-            folder_ciphers_to_insert.push(folder_cipher::ActiveModel {
-                id: NotSet,
-                folder_id: Set(folder_id),
-                cipher_id: Set(id),
-            });
+            folder_ciphers_to_insert.push(serde_json::json!({
+                "folder_id": folder_id,
+                "cipher_id": id,
+            }));
         }
     }
 
-    while !ciphers_to_insert.is_empty() {
-        let batch = drain_up_to(&mut ciphers_to_insert, CIPHER_INSERT_CHUNK);
-        cipher::Entity::insert_many(batch)
-            .exec(&db)
-            .await
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
-    }
+    // Execute inserts as a small, fixed number of statements.
+    // NOTE: This relies on SQLite's JSON table functions (json_each/json_extract),
+    // which are available on modern SQLite/libSQL builds.
+    let bulk = serde_json::json!({
+        "folders": folders_to_insert,
+        "ciphers": ciphers_to_insert,
+        "favorites": favorites_to_insert,
+        "folders_ciphers": folder_ciphers_to_insert,
+    });
 
-    while !favorites_to_insert.is_empty() {
-        let batch = drain_up_to(&mut favorites_to_insert, FAVORITE_INSERT_CHUNK);
-        favorite::Entity::insert_many(batch)
-            .exec(&db)
-            .await
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
-    }
+    let bulk_json = bulk.to_string();
+    let bulk_param = SeaValue::from(bulk_json);
 
-    while !folder_ciphers_to_insert.is_empty() {
-        let batch = drain_up_to(&mut folder_ciphers_to_insert, FOLDER_CIPHER_INSERT_CHUNK);
-        folder_cipher::Entity::insert_many(batch)
-            .exec(&db)
-            .await
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
-    }
+    // Folders.
+    let stmt_folders = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"
+            INSERT INTO folders (id, user_id, name, created_at, updated_at)
+            SELECT
+                json_extract(value, '$.id'),
+                json_extract(value, '$.user_id'),
+                json_extract(value, '$.name'),
+                CAST(json_extract(value, '$.created_at') AS INTEGER),
+                CAST(json_extract(value, '$.updated_at') AS INTEGER)
+            FROM json_each(?1, '$.folders');
+        "#,
+        [bulk_param.clone()],
+    );
+    db.execute_raw(stmt_folders)
+    .await
+    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    // Ciphers.
+    let stmt_ciphers = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"
+            INSERT INTO ciphers (
+                id, created_at, updated_at, user_id, organization_id, key, "type", name, notes,
+                fields, data, password_history, deleted_at, reprompt
+            )
+            SELECT
+                json_extract(value, '$.id'),
+                CAST(json_extract(value, '$.created_at') AS INTEGER),
+                CAST(json_extract(value, '$.updated_at') AS INTEGER),
+                json_extract(value, '$.user_id'),
+                json_extract(value, '$.organization_id'),
+                json_extract(value, '$.key'),
+                CAST(json_extract(value, '$.type') AS INTEGER),
+                json_extract(value, '$.name'),
+                json_extract(value, '$.notes'),
+                json_extract(value, '$.fields'),
+                json_extract(value, '$.data'),
+                json_extract(value, '$.password_history'),
+                CAST(json_extract(value, '$.deleted_at') AS INTEGER),
+                CAST(json_extract(value, '$.reprompt') AS INTEGER)
+            FROM json_each(?1, '$.ciphers');
+        "#,
+        [bulk_param.clone()],
+    );
+    db.execute_raw(stmt_ciphers)
+    .await
+    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    // Favorites.
+    let stmt_favorites = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"
+            INSERT INTO favorites (user_id, cipher_id)
+            SELECT
+                json_extract(value, '$.user_id'),
+                json_extract(value, '$.cipher_id')
+            FROM json_each(?1, '$.favorites');
+        "#,
+        [bulk_param.clone()],
+    );
+    db.execute_raw(stmt_favorites)
+    .await
+    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    // Folder mappings.
+    let stmt_folder_ciphers = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"
+            INSERT INTO folders_ciphers (folder_id, cipher_id)
+            SELECT
+                json_extract(value, '$.folder_id'),
+                json_extract(value, '$.cipher_id')
+            FROM json_each(?1, '$.folders_ciphers');
+        "#,
+        [bulk_param],
+    );
+    db.execute_raw(stmt_folder_ciphers)
+    .await
+    .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
     // Touch user revision so clients resync.
     touch_user_revision(&db, &auth.user.id, now_ts()).await?;
