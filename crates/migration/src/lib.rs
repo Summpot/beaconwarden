@@ -10,7 +10,11 @@ mod m20260130_000007_favorites_and_domains;
 mod m20260130_000009_user_compat_columns;
 mod m20260130_000010_org_core_tables;
 mod m20260130_000011_groups_tables;
-mod m20260130_000012_misc_tables;
+mod m20260130_000012_attachments_and_sends;
+mod m20260130_000013_two_factor_tables;
+mod m20260130_000014_sso_tables;
+mod m20260130_000015_emergency_access_and_events;
+mod m20260130_000016_auth_requests_and_invitations;
 
 pub struct Migrator;
 
@@ -29,7 +33,11 @@ impl MigratorTrait for Migrator {
             Box::new(m20260130_000009_user_compat_columns::Migration),
             Box::new(m20260130_000010_org_core_tables::Migration),
             Box::new(m20260130_000011_groups_tables::Migration),
-            Box::new(m20260130_000012_misc_tables::Migration),
+            Box::new(m20260130_000012_attachments_and_sends::Migration),
+            Box::new(m20260130_000013_two_factor_tables::Migration),
+            Box::new(m20260130_000014_sso_tables::Migration),
+            Box::new(m20260130_000015_emergency_access_and_events::Migration),
+            Box::new(m20260130_000016_auth_requests_and_invitations::Migration),
         ]
     }
 }
