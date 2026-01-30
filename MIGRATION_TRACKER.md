@@ -187,8 +187,8 @@ This table lists what the **Cloudflare Worker** currently serves.
 
 | ID | Task | Depends on | Acceptance criteria | Status |
 |---:|---|---|---|:---:|
-| 7.1 | CI: deploy worker + ensure Turso DB exists | 0.5 | Green deploy job | NS |
-| 7.2 | CI: apply migrations via Worker endpoint | 7.1 | DB schema up-to-date | NS |
+| 7.1 | CI: deploy worker + ensure Turso DB exists | 0.5 | Green deploy job | IP |
+| 7.2 | CI: apply migrations via Worker endpoint | 7.1 | DB schema up-to-date | IP |
 | 7.3 | CI: deploy pages proxy | 0.6 | Green pages deploy job | NS |
 | 7.4 | Add runbooks (secrets, rollback, migrations) | 7.1–7.3 | Docs exist | NS |
 
