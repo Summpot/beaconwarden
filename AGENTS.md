@@ -113,6 +113,21 @@ R2 bucket CORS must allow PUT/GET from the required origins (Pages origin and an
   - `max_connections(1)` and short timeouts (edge runtime friendly)
   - optional `libsql_auth_token`
 
+## Database query budget (Cloudflare Workers subrequests)
+
+Cloudflare Workers enforces strict **subrequest limits** per incoming request.
+With Turso/libSQL over Hrana, **each DB roundtrip counts as a subrequest**, so naive “loop + query” code can easily fail with:
+
+- `Error: Too many subrequests`
+
+Project guideline: **Always optimize for fewer DB queries**.
+
+- Prefer set-based operations (single query over many rows) over per-item lookups.
+- Batch writes with `insert_many` / bulk `update_many` / `delete_many`.
+- Preload reference data once (e.g., existing folder ids) and reuse it in-memory.
+- Avoid patterns like `find_one`/`exists` inside loops during bulk endpoints (imports, sync writes, bulk edits).
+- When you must chunk, pick conservative chunk sizes to stay below SQLite variable limits and request-size constraints.
+
 ## Error handling
 
 Never let unhandled errors bubble to the Worker runtime.

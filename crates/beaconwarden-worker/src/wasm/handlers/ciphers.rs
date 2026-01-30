@@ -281,40 +281,52 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
     }
 
     // Create or reuse folders.
-    let existing_folders: std::collections::HashMap<String, String> = folder::Entity::find()
+    // IMPORTANT: In Workers + libSQL(Hrana), each DB query is a subrequest. Keep this path query-light.
+    let existing_folder_ids: HashSet<String> = folder::Entity::find()
         .filter(folder::Column::UserId.eq(auth.user.id.clone()))
         .all(&db)
         .await
         .map_err(|e| worker::Error::RustError(e.to_string()))?
         .into_iter()
-        .map(|f| (f.id.clone(), f.id))
+        .map(|f| f.id)
         .collect();
 
+    // Batch insert new folders to avoid one-query-per-folder.
+    const FOLDER_INSERT_CHUNK: usize = 150;
+    let mut folders_to_insert: Vec<folder::ActiveModel> = Vec::new();
+
     let mut folder_ids: Vec<String> = Vec::with_capacity(payload.folders.len());
+    let now_folders = now_ts();
     for f in payload.folders {
         // Vaultwarden behavior: only reuse a folder if it already exists for this user.
         // Otherwise create a new folder with a new id (ignore imported id to avoid collisions).
-        if let Some(id) = f.id.as_ref().and_then(|id| existing_folders.get(id)).cloned() {
+        if let Some(id) = f.id.as_ref().filter(|id| existing_folder_ids.contains(*id)).cloned() {
             folder_ids.push(id);
             continue;
         }
 
-        let now = now_ts();
         let folder_id = uuid_v4();
-        let active = folder::ActiveModel {
+        folders_to_insert.push(folder::ActiveModel {
             id: Set(folder_id.clone()),
             user_id: Set(auth.user.id.clone()),
             name: Set(f.name.trim().to_string()),
-            created_at: Set(now),
-            updated_at: Set(now),
-        };
+            created_at: Set(now_folders),
+            updated_at: Set(now_folders),
+        });
+        folder_ids.push(folder_id);
+    }
 
-        let _ = active
-            .insert(&db)
+    fn drain_up_to<T>(v: &mut Vec<T>, max: usize) -> Vec<T> {
+        let take = v.len().min(max);
+        v.drain(..take).collect()
+    }
+
+    while !folders_to_insert.is_empty() {
+        let batch = drain_up_to(&mut folders_to_insert, FOLDER_INSERT_CHUNK);
+        folder::Entity::insert_many(batch)
+            .exec(&db)
             .await
             .map_err(|e| worker::Error::RustError(e.to_string()))?;
-
-        folder_ids.push(folder_id);
     }
 
     // Build cipher-index -> folder-id map.
@@ -324,6 +336,15 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
     }
 
     // Create ciphers.
+    // Avoid per-cipher queries (favorites/folder validation/deletes) to stay under Workers subrequest limits.
+    const CIPHER_INSERT_CHUNK: usize = 25;
+    const FAVORITE_INSERT_CHUNK: usize = 400;
+    const FOLDER_CIPHER_INSERT_CHUNK: usize = 400;
+
+    let mut ciphers_to_insert: Vec<cipher::ActiveModel> = Vec::with_capacity(payload.ciphers.len());
+    let mut favorites_to_insert: Vec<favorite::ActiveModel> = Vec::new();
+    let mut folder_ciphers_to_insert: Vec<folder_cipher::ActiveModel> = Vec::new();
+
     for (idx, cipher_payload) in payload.ciphers.into_iter().enumerate() {
         let name = value_get_string(&cipher_payload, "name").unwrap_or_default();
         let cipher_type = value_get_i32(&cipher_payload, "type").unwrap_or(1);
@@ -338,7 +359,7 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
             .and_then(|folder_idx| folder_ids.get(*folder_idx))
             .cloned();
 
-        let active = cipher::ActiveModel {
+        ciphers_to_insert.push(cipher::ActiveModel {
             id: Set(id.clone()),
             created_at: Set(now),
             updated_at: Set(now),
@@ -353,19 +374,46 @@ pub async fn handle_ciphers_import(mut req: Request, env: &Env) -> Result<Respon
             password_history: Set(cipher_payload.get("passwordHistory").map(|v| v.to_string())),
             deleted_at: Set(None),
             reprompt: Set(value_get_i32(&cipher_payload, "reprompt")),
-        };
+        });
 
-        let _ = active
-            .insert(&db)
+        if want_favorite {
+            favorites_to_insert.push(favorite::ActiveModel {
+                user_id: Set(auth.user.id.clone()),
+                cipher_id: Set(id.clone()),
+            });
+        }
+
+        if let Some(folder_id) = folder_id {
+            folder_ciphers_to_insert.push(folder_cipher::ActiveModel {
+                id: NotSet,
+                folder_id: Set(folder_id),
+                cipher_id: Set(id),
+            });
+        }
+    }
+
+    while !ciphers_to_insert.is_empty() {
+        let batch = drain_up_to(&mut ciphers_to_insert, CIPHER_INSERT_CHUNK);
+        cipher::Entity::insert_many(batch)
+            .exec(&db)
             .await
             .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    }
 
-        // Favorite is a per-user mapping.
-        set_favorite(&db, &auth.user.id, &id, want_favorite).await?;
+    while !favorites_to_insert.is_empty() {
+        let batch = drain_up_to(&mut favorites_to_insert, FAVORITE_INSERT_CHUNK);
+        favorite::Entity::insert_many(batch)
+            .exec(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    }
 
-        if let Some(resp) = set_cipher_folder(&req, &db, &auth.user.id, &id, folder_id).await? {
-            return Ok(resp);
-        }
+    while !folder_ciphers_to_insert.is_empty() {
+        let batch = drain_up_to(&mut folder_ciphers_to_insert, FOLDER_CIPHER_INSERT_CHUNK);
+        folder_cipher::Entity::insert_many(batch)
+            .exec(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
     }
 
     // Touch user revision so clients resync.
