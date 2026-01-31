@@ -185,6 +185,23 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return handlers::organizations::handle_plans_tax_rates(req, &env).await;
     }
 
+    // Sends
+    if path == "/api/sends" {
+        return handlers::sends::handle_sends(req, &env).await;
+    }
+    if path == "/api/sends/file" || path == "/api/sends/file/v2" {
+        return handlers::sends::handle_send_file(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/sends/access/") {
+        let access_id = rest.trim_matches('/').to_string();
+        return handlers::sends::handle_send_access(req, &env, access_id).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/sends/") {
+        let (send_id, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let tail = if tail.is_empty() { None } else { Some(tail) };
+        return handlers::sends::handle_send(req, &env, send_id.to_string(), tail).await;
+    }
+
     // Domains settings (sync settings).
     if path == "/api/settings/domains" {
         return handlers::settings::handle_settings_domains(req, &env).await;

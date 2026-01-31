@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use serde_json::Value;
@@ -135,23 +137,69 @@ pub async fn handle_user_collections(req: Request, env: &Env) -> Result<Response
         return error_response(&req, 405, "method_not_allowed", "Method not allowed");
     }
 
-    let memberships = collection_user::Entity::find()
+    // Vaultwarden semantics:
+    // - If membership.access_all == true, the user effectively has access to all collections
+    //   in that organization, without needing explicit rows in users_collections.
+    // - Otherwise, permissions are granted via users_collections.
+    //
+    // IMPORTANT: Keep DB roundtrips bounded.
+
+    // Confirmed membership status is `2` in Vaultwarden.
+    let org_memberships = membership::Entity::find()
+        .filter(membership::Column::UserId.eq(auth.user.id.clone()))
+        .filter(membership::Column::Status.eq(2))
+        .all(&db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let access_all_org_ids: Vec<String> = org_memberships
+        .iter()
+        .filter(|m| m.access_all)
+        .map(|m| m.organization_id.clone())
+        .collect();
+
+    let explicit = collection_user::Entity::find()
         .filter(collection_user::Column::UserId.eq(auth.user.id.clone()))
         .all(&db)
         .await
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
-    let collection_ids: Vec<String> = memberships.into_iter().map(|m| m.collection_id).collect();
-    if collection_ids.is_empty() {
+    let explicit_collection_ids: Vec<String> = explicit.into_iter().map(|m| m.collection_id).collect();
+
+    if access_all_org_ids.is_empty() && explicit_collection_ids.is_empty() {
         let resp = Response::from_json(&empty_list_json())?;
         return json_with_cors(&req, resp);
     }
 
-    let cols = collection::Entity::find()
-        .filter(collection::Column::Id.is_in(collection_ids))
-        .all(&db)
-        .await
-        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    let mut by_id: HashMap<String, collection::Model> = HashMap::new();
+
+    if !explicit_collection_ids.is_empty() {
+        let cols = collection::Entity::find()
+            .filter(collection::Column::Id.is_in(explicit_collection_ids))
+            .all(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        for c in cols {
+            by_id.insert(c.id.clone(), c);
+        }
+    }
+
+    if !access_all_org_ids.is_empty() {
+        // De-dup org ids for stable, smaller queries.
+        let uniq: HashSet<String> = access_all_org_ids.into_iter().collect();
+        let cols = collection::Entity::find()
+            .filter(collection::Column::OrganizationId.is_in(uniq.into_iter().collect::<Vec<_>>()))
+            .all(&db)
+            .await
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+        for c in cols {
+            by_id.insert(c.id.clone(), c);
+        }
+    }
+
+    let cols: Vec<collection::Model> = by_id.into_values().collect();
 
     let resp = Response::from_json(&serde_json::json!({
         "data": cols.iter().map(collection_json).collect::<Vec<_>>(),
@@ -283,10 +331,35 @@ pub async fn handle_organizations(mut req: Request, env: &Env) -> Result<Respons
             let resp = Response::from_json(&organization_json(&org))?;
             json_with_cors(&req, resp)
         }
-        // Compatibility: some clients/UI paths want these endpoints present.
         Method::Get => {
-            // We do not yet implement a full organization directory view. For now return an empty list.
-            let resp = Response::from_json(&empty_list_json())?;
+            // Return organizations the current user is a confirmed member of.
+            // Confirmed membership status is `2` in Vaultwarden.
+            let members = membership::Entity::find()
+                .filter(membership::Column::UserId.eq(auth.user.id.clone()))
+                .filter(membership::Column::Status.eq(2))
+                .all(&db)
+                .await
+                .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+            let org_ids: Vec<String> = members.into_iter().map(|m| m.organization_id).collect();
+            if org_ids.is_empty() {
+                let resp = Response::from_json(&empty_list_json())?;
+                return json_with_cors(&req, resp);
+            }
+
+            // De-dup org ids to avoid redundant SQL IN parameters.
+            let uniq: HashSet<String> = org_ids.into_iter().collect();
+            let orgs = organization::Entity::find()
+                .filter(organization::Column::Id.is_in(uniq.into_iter().collect::<Vec<_>>()))
+                .all(&db)
+                .await
+                .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+            let resp = Response::from_json(&serde_json::json!({
+                "data": orgs.iter().map(organization_json).collect::<Vec<_>>(),
+                "object": "list",
+                "continuationToken": Value::Null,
+            }))?;
             json_with_cors(&req, resp)
         }
         _ => error_response(&req, 405, "method_not_allowed", "Method not allowed"),

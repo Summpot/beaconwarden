@@ -12,3 +12,4 @@ pub mod migrations;
 pub mod sync;
 pub mod settings;
 pub mod organizations;
+pub mod sends;

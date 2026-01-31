@@ -169,7 +169,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | POST | `/api/ciphers/move` | Bulk move ciphers to folder | DONE |
 | PUT | `/api/ciphers/move` | Bulk move ciphers (compat alias) | DONE |
 | GET | `/api/collections` | List collections visible to user | DONE |
-| GET | `/api/organizations` | List organizations (currently empty compat) | DONE |
+| GET | `/api/organizations` | List organizations (from confirmed memberships) | DONE |
 | POST | `/api/organizations` | Create organization (owner + default collection) | DONE |
 | GET | `/api/organizations/<org_id>` | Get organization | DONE |
 | GET | `/api/organizations/<org_id>/collections` | List organization collections | DONE |
@@ -184,6 +184,16 @@ This table lists what the **Cloudflare Worker** currently serves.
 | GET | `/api/plans/sales-tax-rates` | Sales tax rates (compat, empty) | DONE |
 | GET | `/api/organizations/<org_id>/events` | Organization events (currently empty compat) | DONE |
 | GET | `/api/organizations/<org_id>/users/<member_id>/events` | Org user events (currently empty compat) | DONE |
+| GET | `/api/sends` | List Sends (text sends supported) | DONE |
+| POST | `/api/sends` | Create Send (text only; file sends not yet) | DONE |
+| GET | `/api/sends/<id>` | Get Send (owner) | DONE |
+| PUT | `/api/sends/<id>` | Update Send (owner) | DONE |
+| POST | `/api/sends/<id>` | Update Send (compat alias) | DONE |
+| DELETE | `/api/sends/<id>` | Delete Send (owner) | DONE |
+| PUT | `/api/sends/<id>/remove-password` | Remove Send password | DONE |
+| POST | `/api/sends/access/<access_id>` | Access Send (public) | DONE |
+| POST | `/api/sends/file` | Create file Send (not implemented yet) | IP |
+| POST | `/api/sends/file/v2` | Create file Send (not implemented yet) | IP |
 | POST | `/events/collect` | Event collect (currently no-op compat) | DONE |
 | POST | `/identity/accounts/prelogin` | Alias to `/api/accounts/prelogin` | DONE |
 | POST | `/identity/accounts/register` | Alias to `/api/accounts/register` | DONE |
@@ -204,7 +214,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | `api/core/organizations` | `/api/organizations/*`, `/api/collections`, `/api/plans*` | Partial implementation; sharing/invites still pending | IP |
 | `api/core/events` | `/api/events/*`, `/events/collect` | Optional; currently stubbed/empty | DONE |
 | `api/core/emergency_access` | `/api/emergency-access/*` | Likely stateful; may be reduced | NS |
-| `api/core/sends` | `/api/sends/*` | Optional but commonly used | NS |
+| `api/core/sends` | `/api/sends/*` | Text sends implemented; file sends pending | IP |
 | `api/admin` | `/admin/*` | Replace with minimal ops endpoints | NS |
 | `api/icons` | `/icons/*` | Optional; may be simplified | NS |
 | `api/notifications` | `/notifications/*` | **Dropped** (no websockets) | DONE |
