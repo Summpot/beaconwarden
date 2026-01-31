@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
-use worker::{Env, Request, Response, Result};
+use worker::{Env, Method, Request, Response, Result};
 
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
@@ -12,11 +12,12 @@ use crate::worker_wasm::env::env_string;
 use crate::worker_wasm::handlers::auth::{authenticate, AuthResult};
 use crate::worker_wasm::http::{error_response, internal_error_response, json_with_cors};
 use crate::worker_wasm::util::{
-    generate_security_stamp, normalize_user_id_for_client, now_ts, random_bytes, uuid_v4,
+    generate_access_token, generate_security_stamp, normalize_user_id_for_client, now_ts, random_bytes,
+    ts_to_rfc3339, uuid_v4,
 };
 use crate::worker_wasm::{brevo};
 
-use entity::{user, user::Entity as UserEntity};
+use entity::{device, user, user::Entity as UserEntity};
 
 fn profile_json(u: &user::Model) -> Value {
     let status = if u.password_hash.as_ref().is_some_and(|v| !v.is_empty()) {
@@ -42,11 +43,69 @@ fn profile_json(u: &user::Model) -> Value {
         "providers": [],
         "providerOrganizations": [],
         "forcePasswordReset": false,
-        "avatarColor": Value::Null,
+        "avatarColor": u
+            .avatar_color
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
         "usesKeyConnector": false,
         "creationDate": Value::Null,
         "object": "profile",
     })
+}
+
+fn master_password_policy_json() -> Value {
+    // Keep a stable shape and match Vaultwarden's PascalCase `Object`.
+    serde_json::json!({
+        "Object": "masterPasswordPolicy",
+    })
+}
+
+fn clean_password_hint(password_hint: &Option<String>) -> Option<String> {
+    match password_hint.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(v) => Some(v.to_string()),
+        None => None,
+    }
+}
+
+fn verify_master_password_hash(u: &user::Model, master_password_hash: &str) -> bool {
+    let Some(ref stored_hash) = u.password_hash else {
+        return false;
+    };
+    let Some(ref salt) = u.salt else {
+        return false;
+    };
+
+    crypto::verify_password_hash(
+        master_password_hash.as_bytes(),
+        salt,
+        stored_hash,
+        u.password_iterations as u32,
+    )
+}
+
+async fn delete_other_devices(
+    db: &DatabaseConnection,
+    user_id: &str,
+    keep_device_id: &str,
+) -> Result<()> {
+    device::Entity::delete_many()
+        .filter(device::Column::UserId.eq(user_id))
+        .filter(device::Column::Id.ne(keep_device_id))
+        .exec(db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    Ok(())
+}
+
+async fn delete_all_devices(db: &DatabaseConnection, user_id: &str) -> Result<()> {
+    device::Entity::delete_many()
+        .filter(device::Column::UserId.eq(user_id))
+        .exec(db)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    Ok(())
 }
 
 pub async fn handle_profile(req: Request, env: &Env) -> Result<Response> {
@@ -86,6 +145,547 @@ pub async fn handle_tasks(req: Request, _env: &Env) -> Result<Response> {
         "data": [],
         "object": "list",
     }))?;
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileData {
+    name: String,
+}
+
+/// POST/PUT /api/accounts/profile
+pub async fn handle_profile_update(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post && req.method() != Method::Put {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: ProfileData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/profile: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    if payload.name.len() > 50 {
+        return error_response(
+            &req,
+            400,
+            "invalid_name",
+            "The field Name must be a string with a maximum length of 50.",
+        );
+    }
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let now = now_ts();
+    let mut active: user::ActiveModel = auth.user.into();
+    active.name = Set(Some(payload.name));
+    active.updated_at = Set(now);
+
+    let saved = match active.update(&db).await {
+        Ok(u) => u,
+        Err(e) => return internal_error_response(&req, "Failed to save user", &e),
+    };
+
+    let resp = Response::from_json(&profile_json(&saved))?;
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AvatarData {
+    avatar_color: Option<String>,
+}
+
+/// PUT /api/accounts/avatar
+pub async fn handle_avatar_update(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Put {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: AvatarData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/avatar: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    if let Some(color) = payload.avatar_color.as_ref() {
+        if color.len() != 7 {
+            return error_response(
+                &req,
+                400,
+                "invalid_avatar_color",
+                "The field AvatarColor must be a HTML/Hex color code with a length of 7 characters",
+            );
+        }
+    }
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let now = now_ts();
+    let mut active: user::ActiveModel = auth.user.into();
+    active.avatar_color = Set(payload.avatar_color);
+    active.updated_at = Set(now);
+
+    let saved = match active.update(&db).await {
+        Ok(u) => u,
+        Err(e) => return internal_error_response(&req, "Failed to save user", &e),
+    };
+
+    let resp = Response::from_json(&profile_json(&saved))?;
+    json_with_cors(&req, resp)
+}
+
+/// POST /api/accounts/keys
+pub async fn handle_post_keys(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: KeysData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/keys: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let now = now_ts();
+    let mut active: user::ActiveModel = auth.user.into();
+    active.private_key = Set(Some(payload.encrypted_private_key));
+    active.public_key = Set(Some(payload.public_key));
+    active.updated_at = Set(now);
+
+    let saved = match active.update(&db).await {
+        Ok(u) => u,
+        Err(e) => return internal_error_response(&req, "Failed to save user", &e),
+    };
+
+    let resp = Response::from_json(&serde_json::json!({
+        "privateKey": saved.private_key,
+        "publicKey": saved.public_key,
+        "object": "keys",
+    }))?;
+
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangePassData {
+    master_password_hash: String,
+    new_master_password_hash: String,
+    master_password_hint: Option<String>,
+    key: String,
+}
+
+/// POST /api/accounts/password
+pub async fn handle_post_password(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: ChangePassData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/password: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    if !verify_master_password_hash(&auth.user, &payload.master_password_hash) {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    }
+
+    let now = now_ts();
+    let salt = random_bytes(64);
+    let server_iterations: i32 = 100_000;
+    let pwd_hash = crypto::hash_password(
+        payload.new_master_password_hash.as_bytes(),
+        &salt,
+        server_iterations as u32,
+    );
+
+    let mut active: user::ActiveModel = auth.user.into();
+    active.password_hash = Set(Some(pwd_hash));
+    active.salt = Set(Some(salt));
+    active.password_iterations = Set(server_iterations);
+    active.password_hint = Set(clean_password_hint(&payload.master_password_hint));
+    active.akey = Set(payload.key);
+    active.security_stamp = Set(generate_security_stamp());
+    active.updated_at = Set(now);
+
+    if let Err(e) = active.update(&db).await {
+        return internal_error_response(&req, "Failed to save user", &e);
+    }
+
+    // Invalidate other sessions.
+    if let Err(e) = delete_other_devices(&db, &auth.device.user_id, &auth.device.id).await {
+        worker::console_log!("Failed to delete other devices after password change: {e}");
+    }
+
+    let resp = Response::empty()?.with_status(200);
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct KdfData {
+    #[serde(alias = "kdfType")]
+    kdf: i32,
+    #[serde(alias = "iterations")]
+    kdf_iterations: i32,
+    #[serde(alias = "memory")]
+    kdf_memory: Option<i32>,
+    #[serde(alias = "parallelism")]
+    kdf_parallelism: Option<i32>,
+}
+
+fn validate_kdf_settings(data: &KdfData) -> std::result::Result<(), &'static str> {
+    // 0 = PBKDF2, 1 = Argon2id
+    if data.kdf == 0 {
+        if data.kdf_iterations < 100_000 {
+            return Err("PBKDF2 KDF iterations must be at least 100000.");
+        }
+        return Ok(());
+    }
+
+    if data.kdf == 1 {
+        if data.kdf_iterations < 1 {
+            return Err("Argon2 KDF iterations must be at least 1.");
+        }
+        let Some(m) = data.kdf_memory else {
+            return Err("Argon2 memory parameter is required.");
+        };
+        if !(15..=1024).contains(&m) {
+            return Err("Argon2 memory must be between 15 MB and 1024 MB.");
+        }
+        let Some(p) = data.kdf_parallelism else {
+            return Err("Argon2 parallelism parameter is required.");
+        };
+        if !(1..=16).contains(&p) {
+            return Err("Argon2 parallelism must be between 1 and 16.");
+        }
+        return Ok(());
+    }
+
+    Err("Unsupported KDF type")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticationData {
+    salt: String,
+    kdf: KdfData,
+    master_password_authentication_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnlockData {
+    salt: String,
+    kdf: KdfData,
+    master_key_wrapped_user_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeKdfData {
+    // Kept for compatibility but not used by Vaultwarden for the update itself.
+    new_master_password_hash: Option<String>,
+    key: Option<String>,
+    authentication_data: AuthenticationData,
+    unlock_data: UnlockData,
+    master_password_hash: String,
+}
+
+/// POST /api/accounts/kdf
+pub async fn handle_post_kdf(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: ChangeKdfData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/kdf: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    if payload.authentication_data.kdf != payload.unlock_data.kdf {
+        return error_response(
+            &req,
+            400,
+            "invalid_kdf",
+            "KDF settings must be equal for authentication and unlock",
+        );
+    }
+
+    if let Err(msg) = validate_kdf_settings(&payload.unlock_data.kdf) {
+        return error_response(&req, 400, "invalid_kdf", msg);
+    }
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    if !verify_master_password_hash(&auth.user, &payload.master_password_hash) {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    }
+
+    // Salt must match email (Vaultwarden requirement).
+    if auth.user.email != payload.authentication_data.salt || auth.user.email != payload.unlock_data.salt {
+        return error_response(&req, 400, "invalid_salt", "Invalid master password salt");
+    }
+
+    let now = now_ts();
+    let salt = random_bytes(64);
+    let server_iterations: i32 = 100_000;
+    let pwd_hash = crypto::hash_password(
+        payload
+            .authentication_data
+            .master_password_authentication_hash
+            .as_bytes(),
+        &salt,
+        server_iterations as u32,
+    );
+
+    let mut active: user::ActiveModel = auth.user.into();
+    active.client_kdf_type = Set(payload.unlock_data.kdf.kdf);
+    active.client_kdf_iter = Set(payload.unlock_data.kdf.kdf_iterations);
+    active.client_kdf_memory = Set(payload.unlock_data.kdf.kdf_memory);
+    active.client_kdf_parallelism = Set(payload.unlock_data.kdf.kdf_parallelism);
+
+    active.password_hash = Set(Some(pwd_hash));
+    active.salt = Set(Some(salt));
+    active.password_iterations = Set(server_iterations);
+    active.akey = Set(payload.unlock_data.master_key_wrapped_user_key);
+    active.security_stamp = Set(generate_security_stamp());
+    active.updated_at = Set(now);
+
+    if let Err(e) = active.update(&db).await {
+        return internal_error_response(&req, "Failed to save user", &e);
+    }
+
+    // Invalidate other sessions.
+    if let Err(e) = delete_other_devices(&db, &auth.device.user_id, &auth.device.id).await {
+        worker::console_log!("Failed to delete other devices after kdf change: {e}");
+    }
+
+    let resp = Response::empty()?.with_status(200);
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretVerificationRequest {
+    master_password_hash: String,
+}
+
+/// POST /api/accounts/verify-password
+pub async fn handle_verify_password(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: SecretVerificationRequest = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/verify-password: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    if !verify_master_password_hash(&auth.user, &payload.master_password_hash) {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    }
+
+    let resp = Response::from_json(&master_password_policy_json())?;
+    json_with_cors(&req, resp)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordOrOtpData {
+    #[serde(alias = "MasterPasswordHash")]
+    master_password_hash: Option<String>,
+    otp: Option<String>,
+}
+
+impl PasswordOrOtpData {
+    fn master_password_hash(&self) -> Option<&str> {
+        self.master_password_hash.as_deref().filter(|s| !s.trim().is_empty())
+    }
+}
+
+async fn api_key_impl(mut req: Request, env: &Env, rotate: bool) -> Result<Response> {
+    let payload: PasswordOrOtpData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/api-key: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    // OTP is not supported yet in the Worker runtime.
+    let Some(master_hash) = payload.master_password_hash() else {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    };
+    if !verify_master_password_hash(&auth.user, master_hash) {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    }
+
+    let now = now_ts();
+    let should_rotate = rotate || auth.user.api_key.is_none();
+    let mut active: user::ActiveModel = auth.user.into();
+
+    if should_rotate {
+        active.api_key = Set(Some(generate_access_token()));
+    }
+    active.updated_at = Set(now);
+
+    let saved = match active.update(&db).await {
+        Ok(u) => u,
+        Err(e) => return internal_error_response(&req, "Failed to save user", &e),
+    };
+
+    let resp = Response::from_json(&serde_json::json!({
+        "apiKey": saved.api_key,
+        "revisionDate": ts_to_rfc3339(saved.updated_at),
+        "object": "apiKey",
+    }))?;
+
+    json_with_cors(&req, resp)
+}
+
+/// POST /api/accounts/api-key
+pub async fn handle_api_key(req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+    api_key_impl(req, env, false).await
+}
+
+/// POST /api/accounts/rotate-api-key
+pub async fn handle_rotate_api_key(req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+    api_key_impl(req, env, true).await
+}
+
+/// POST /api/accounts/security-stamp
+pub async fn handle_security_stamp(mut req: Request, env: &Env) -> Result<Response> {
+    if req.method() != Method::Post {
+        return error_response(&req, 405, "method_not_allowed", "Method not allowed");
+    }
+
+    let payload: PasswordOrOtpData = match req.json().await {
+        Ok(p) => p,
+        Err(e) => {
+            worker::console_log!("Invalid JSON in accounts/security-stamp: {e}");
+            return error_response(&req, 400, "invalid_json", "Invalid JSON body");
+        }
+    };
+
+    let db = match db_connect(env).await {
+        Ok(db) => db,
+        Err(e) => return internal_error_response(&req, "Failed to open libSQL connection", &e),
+    };
+
+    let auth = match authenticate(&req, &db).await? {
+        AuthResult::Authorized(a) => a,
+        AuthResult::Unauthorized(resp) => return Ok(resp),
+    };
+
+    let Some(master_hash) = payload.master_password_hash() else {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    };
+    if !verify_master_password_hash(&auth.user, master_hash) {
+        return error_response(&req, 400, "invalid_password", "Invalid password");
+    }
+
+    // Delete all devices (logs out everywhere) and rotate security stamp.
+    if let Err(e) = delete_all_devices(&db, &auth.user.id).await {
+        return internal_error_response(&req, "Failed to delete user devices", &e);
+    }
+
+    let now = now_ts();
+    let mut active: user::ActiveModel = auth.user.into();
+    active.security_stamp = Set(generate_security_stamp());
+    active.updated_at = Set(now);
+    if let Err(e) = active.update(&db).await {
+        return internal_error_response(&req, "Failed to save user", &e);
+    }
+
+    let resp = Response::empty()?.with_status(200);
     json_with_cors(&req, resp)
 }
 

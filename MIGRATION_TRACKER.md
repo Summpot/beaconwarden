@@ -107,15 +107,41 @@ This table lists what the **Cloudflare Worker** currently serves.
 | Method | Path | Purpose | Status |
 |---|---|---|:---:|
 | GET | `/health` | Health check | DONE |
+| GET | `/api/now` | Server time (RFC3339 string) | DONE |
+| GET | `/api/version` | Server version string | DONE |
+| GET | `/api/alive` | Liveness check (includes DB connectivity) | DONE |
+| GET | `/api/webauthn` | WebAuthn metadata (empty list compat) | DONE |
 | GET | `/api/config` | Bitwarden config | DONE |
 | POST | `/api/accounts/prelogin` | KDF negotiation | DONE |
+| POST | `/api/accounts/password-hint` | Password hint email (best-effort) | DONE |
 | POST | `/api/accounts/register` | Registration (legacy path) | DONE |
+| GET | `/api/accounts/profile` | Account profile | DONE |
+| POST | `/api/accounts/profile` | Update profile (compat alias) | DONE |
+| PUT | `/api/accounts/profile` | Update profile | DONE |
+| PUT | `/api/accounts/avatar` | Update avatar color | DONE |
+| POST | `/api/accounts/keys` | Set asymmetric keys | DONE |
+| POST | `/api/accounts/password` | Change password | DONE |
+| POST | `/api/accounts/kdf` | Change KDF settings | DONE |
+| POST | `/api/accounts/verify-password` | Verify master password | DONE |
+| POST | `/api/accounts/api-key` | Get/create API key | DONE |
+| POST | `/api/accounts/rotate-api-key` | Rotate API key | DONE |
+| POST | `/api/accounts/security-stamp` | Rotate security stamp (logout everywhere) | DONE |
+| GET | `/api/accounts/revision-date` | Revision timestamp (ms) | DONE |
+| GET | `/api/tasks` | Background task list (empty compat) | DONE |
+| GET | `/api/users/<id>/public-key` | Fetch a user's public key | DONE |
 | POST | `/identity/connect/token` | Login/refresh token | DONE |
 | GET | `/api/sync` | Sync response | DONE |
 | POST | `/api/ciphers/import` | Bulk cipher import (Bitwarden JSON) | DONE |
 | GET | `/api/settings/domains` | Equivalent domains settings (read) | DONE |
 | POST | `/api/settings/domains` | Equivalent domains settings (update) | DONE |
 | PUT | `/api/settings/domains` | Equivalent domains settings (update) | DONE |
+| GET | `/api/devices` | List devices | DONE |
+| GET | `/api/devices/knowndevice` | Known-device check | DONE |
+| GET | `/api/devices/identifier/<device_id>` | Get device by identifier | DONE |
+| POST | `/api/devices/identifier/<device_id>/token` | Store push token (push is ignored) | DONE |
+| PUT | `/api/devices/identifier/<device_id>/token` | Store push token (push is ignored) | DONE |
+| POST | `/api/devices/identifier/<device_id>/clear-token` | Clear push token (push is ignored) | DONE |
+| PUT | `/api/devices/identifier/<device_id>/clear-token` | Clear push token (push is ignored) | DONE |
 | GET | `/api/folders` | List folders | DONE |
 | POST | `/api/folders` | Create folder | DONE |
 | GET | `/api/folders/<id>` | Get folder | DONE |
@@ -128,6 +154,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | DELETE | `/api/ciphers` | Bulk cipher hard delete | DONE |
 | GET | `/api/ciphers/<id>` | Get cipher | DONE |
 | GET | `/api/ciphers/<id>/details` | Get cipher details (compat alias) | DONE |
+| GET | `/api/ciphers/<id>/events` | Cipher events (currently empty compat) | DONE |
 | PUT | `/api/ciphers/<id>` | Update cipher | DONE |
 | POST | `/api/ciphers/<id>` | Update cipher (compat alias) | DONE |
 | DELETE | `/api/ciphers/<id>` | Hard delete cipher | DONE |
@@ -141,6 +168,9 @@ This table lists what the **Cloudflare Worker** currently serves.
 | PUT | `/api/ciphers/restore` | Bulk cipher restore | DONE |
 | POST | `/api/ciphers/move` | Bulk move ciphers to folder | DONE |
 | PUT | `/api/ciphers/move` | Bulk move ciphers (compat alias) | DONE |
+| GET | `/api/organizations/<org_id>/events` | Organization events (currently empty compat) | DONE |
+| GET | `/api/organizations/<org_id>/users/<member_id>/events` | Org user events (currently empty compat) | DONE |
+| POST | `/events/collect` | Event collect (currently no-op compat) | DONE |
 | POST | `/identity/accounts/prelogin` | Alias to `/api/accounts/prelogin` | DONE |
 | POST | `/identity/accounts/register` | Alias to `/api/accounts/register` | DONE |
 | POST | `/identity/accounts/register/send-verification-email` | Signup email verification | DONE |
@@ -158,7 +188,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | `api/core/ciphers` | `/api/ciphers/*`, `/api/sync` | Critical | IP |
 | `api/core/folders` | `/api/folders/*` |  | DONE |
 | `api/core/organizations` | `/api/organizations/*` |  | NS |
-| `api/core/events` | `/api/events/*` | Optional; can be stubbed | NS |
+| `api/core/events` | `/api/events/*`, `/events/collect` | Optional; currently stubbed/empty | DONE |
 | `api/core/emergency_access` | `/api/emergency-access/*` | Likely stateful; may be reduced | NS |
 | `api/core/sends` | `/api/sends/*` | Optional but commonly used | NS |
 | `api/admin` | `/admin/*` | Replace with minimal ops endpoints | NS |

@@ -101,19 +101,61 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() == Method::Get && path == "/api/accounts/profile" {
         return handlers::accounts::handle_profile(req, &env).await;
     }
+    if (req.method() == Method::Post || req.method() == Method::Put) && path == "/api/accounts/profile" {
+        return handlers::accounts::handle_profile_update(req, &env).await;
+    }
+    if req.method() == Method::Put && path == "/api/accounts/avatar" {
+        return handlers::accounts::handle_avatar_update(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/keys" {
+        return handlers::accounts::handle_post_keys(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/password" {
+        return handlers::accounts::handle_post_password(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/kdf" {
+        return handlers::accounts::handle_post_kdf(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/verify-password" {
+        return handlers::accounts::handle_verify_password(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/api-key" {
+        return handlers::accounts::handle_api_key(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/rotate-api-key" {
+        return handlers::accounts::handle_rotate_api_key(req, &env).await;
+    }
+    if req.method() == Method::Post && path == "/api/accounts/security-stamp" {
+        return handlers::accounts::handle_security_stamp(req, &env).await;
+    }
     if req.method() == Method::Get && path == "/api/accounts/revision-date" {
         return handlers::accounts::handle_revision_date(req, &env).await;
     }
     if req.method() == Method::Get && path == "/api/tasks" {
         return handlers::accounts::handle_tasks(req, &env).await;
     }
+    if req.method() == Method::Get && path == "/api/devices/knowndevice" {
+        return handlers::devices::handle_known_device(req, &env).await;
+    }
     if req.method() == Method::Get && path == "/api/devices" {
         return handlers::devices::handle_devices(req, &env).await;
     }
     if let Some(rest) = path.strip_prefix("/api/devices/identifier/") {
-        // Matches legacy: GET /devices/identifier/<device_id>
-        let device_id = rest.split('/').next().unwrap_or("").to_string();
-        return handlers::devices::handle_device(req, &env, device_id).await;
+        // Matches legacy:
+        // - GET /devices/identifier/<device_id>
+        // - POST/PUT /devices/identifier/<device_id>/token
+        // - POST/PUT /devices/identifier/<device_id>/clear-token
+        let (device_id, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let tail = tail.trim_matches('/');
+
+        if tail == "token" {
+            return handlers::devices::handle_device_token(req, &env, device_id.to_string()).await;
+        }
+        if tail == "clear-token" {
+            return handlers::devices::handle_device_clear_token(req, &env, device_id.to_string()).await;
+        }
+
+        return handlers::devices::handle_device(req, &env, device_id.to_string()).await;
     }
     if let Some(rest) = path.strip_prefix("/api/users/") {
         // Matches legacy: GET /users/<user_id>/public-key
@@ -134,6 +176,28 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return handlers::identity::handle_connect_token(req, &env).await;
     }
 
+    // Events
+    if req.method() == Method::Post && path == "/events/collect" {
+        return handlers::events::handle_collect(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/organizations/") {
+        // GET /api/organizations/<org_id>/events
+        // GET /api/organizations/<org_id>/users/<member_id>/events
+        let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() == 2 && parts[1] == "events" {
+            return handlers::events::handle_org_events(req, &env, parts[0].to_string()).await;
+        }
+        if parts.len() == 4 && parts[1] == "users" && parts[3] == "events" {
+            return handlers::events::handle_user_events(
+                req,
+                &env,
+                parts[0].to_string(),
+                parts[2].to_string(),
+            )
+            .await;
+        }
+    }
+
     // Folders.
     if path == "/api/folders" {
         return handlers::folders::handle_folders(req, &env).await;
@@ -147,6 +211,15 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Ciphers.
     if req.method() == Method::Post && path == "/api/ciphers/import" {
         return handlers::ciphers::handle_ciphers_import(req, &env).await;
+    }
+
+    // GET /api/ciphers/<cipher_id>/events (must be before the generic /api/ciphers/<id> handler)
+    if let Some(rest) = path.strip_prefix("/api/ciphers/") {
+        if let Some((cipher_id, tail)) = rest.split_once('/') {
+            if req.method() == Method::Get && tail.trim_matches('/') == "events" {
+                return handlers::events::handle_cipher_events(req, &env, cipher_id.to_string()).await;
+            }
+        }
     }
 
     // Bulk cipher operations must be routed before the "/api/ciphers/<id>" prefix handler.

@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod config;
 pub mod ciphers;
 pub mod devices;
+pub mod events;
 pub mod folders;
 pub mod identity;
 pub mod migrations;
