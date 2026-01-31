@@ -168,6 +168,20 @@ This table lists what the **Cloudflare Worker** currently serves.
 | PUT | `/api/ciphers/restore` | Bulk cipher restore | DONE |
 | POST | `/api/ciphers/move` | Bulk move ciphers to folder | DONE |
 | PUT | `/api/ciphers/move` | Bulk move ciphers (compat alias) | DONE |
+| GET | `/api/collections` | List collections visible to user | DONE |
+| GET | `/api/organizations` | List organizations (currently empty compat) | DONE |
+| POST | `/api/organizations` | Create organization (owner + default collection) | DONE |
+| GET | `/api/organizations/<org_id>` | Get organization | DONE |
+| GET | `/api/organizations/<org_id>/collections` | List organization collections | DONE |
+| GET | `/api/organizations/<org_id>/policies` | List organization policies | DONE |
+| GET | `/api/organizations/<org_id>/public-key` | Org public key (compat) | DONE |
+| GET | `/api/organizations/<org_id>/keys` | Org keys (compat alias) | DONE |
+| GET | `/api/organizations/<org_id>/tax` | Org tax rates (compat, empty) | DONE |
+| GET | `/api/organizations/<org_id>/billing/metadata` | Billing metadata (compat, empty) | DONE |
+| GET | `/api/organizations/<org_id>/billing/vnext/warnings` | Billing warnings (compat, minimal) | DONE |
+| GET | `/api/plans` | Plans list (compat, minimal) | DONE |
+| GET | `/api/plans/all` | Plans list (compat, minimal) | DONE |
+| GET | `/api/plans/sales-tax-rates` | Sales tax rates (compat, empty) | DONE |
 | GET | `/api/organizations/<org_id>/events` | Organization events (currently empty compat) | DONE |
 | GET | `/api/organizations/<org_id>/users/<member_id>/events` | Org user events (currently empty compat) | DONE |
 | POST | `/events/collect` | Event collect (currently no-op compat) | DONE |
@@ -187,7 +201,7 @@ This table lists what the **Cloudflare Worker** currently serves.
 | `api/core/accounts` | `/api/accounts/*` | Signup, profile, keys | IP |
 | `api/core/ciphers` | `/api/ciphers/*`, `/api/sync` | Critical | IP |
 | `api/core/folders` | `/api/folders/*` |  | DONE |
-| `api/core/organizations` | `/api/organizations/*` |  | NS |
+| `api/core/organizations` | `/api/organizations/*`, `/api/collections`, `/api/plans*` | Partial implementation; sharing/invites still pending | IP |
 | `api/core/events` | `/api/events/*`, `/events/collect` | Optional; currently stubbed/empty | DONE |
 | `api/core/emergency_access` | `/api/emergency-access/*` | Likely stateful; may be reduced | NS |
 | `api/core/sends` | `/api/sends/*` | Optional but commonly used | NS |

@@ -168,6 +168,23 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return handlers::config::handle_config(req, &env).await;
     }
 
+    // Organizations (partial implementation / compatibility)
+    if path == "/api/organizations" {
+        return handlers::organizations::handle_organizations(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/collections" {
+        return handlers::organizations::handle_user_collections(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/plans" {
+        return handlers::organizations::handle_plans(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/plans/all" {
+        return handlers::organizations::handle_plans_all(req, &env).await;
+    }
+    if req.method() == Method::Get && path == "/api/plans/sales-tax-rates" {
+        return handlers::organizations::handle_plans_tax_rates(req, &env).await;
+    }
+
     // Domains settings (sync settings).
     if path == "/api/settings/domains" {
         return handlers::settings::handle_settings_domains(req, &env).await;
@@ -181,20 +198,40 @@ pub async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return handlers::events::handle_collect(req, &env).await;
     }
     if let Some(rest) = path.strip_prefix("/api/organizations/") {
-        // GET /api/organizations/<org_id>/events
-        // GET /api/organizations/<org_id>/users/<member_id>/events
+        // Events
+        // - GET /api/organizations/<org_id>/events
+        // - GET /api/organizations/<org_id>/users/<member_id>/events
+        //
+        // Organizations API
+        // - GET /api/organizations/<org_id>
+        // - GET /api/organizations/<org_id>/collections
+        // - GET /api/organizations/<org_id>/policies
+        // - GET /api/organizations/<org_id>/public-key (or /keys)
+        // - GET /api/organizations/<org_id>/tax
+        // - GET /api/organizations/<org_id>/billing/*
         let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
-        if parts.len() == 2 && parts[1] == "events" {
-            return handlers::events::handle_org_events(req, &env, parts[0].to_string()).await;
-        }
-        if parts.len() == 4 && parts[1] == "users" && parts[3] == "events" {
-            return handlers::events::handle_user_events(
-                req,
-                &env,
-                parts[0].to_string(),
-                parts[2].to_string(),
-            )
-            .await;
+        if !parts.is_empty() {
+            if parts.len() == 2 && parts[1] == "events" {
+                return handlers::events::handle_org_events(req, &env, parts[0].to_string()).await;
+            }
+            if parts.len() == 4 && parts[1] == "users" && parts[3] == "events" {
+                return handlers::events::handle_user_events(
+                    req,
+                    &env,
+                    parts[0].to_string(),
+                    parts[2].to_string(),
+                )
+                .await;
+            }
+
+            let org_id = parts[0].to_string();
+            let tail_owned = if parts.len() > 1 {
+                Some(parts[1..].join("/"))
+            } else {
+                None
+            };
+
+            return handlers::organizations::handle_organization(req, &env, org_id, tail_owned.as_deref()).await;
         }
     }
 

@@ -11,3 +11,4 @@ pub mod identity;
 pub mod migrations;
 pub mod sync;
 pub mod settings;
+pub mod organizations;
