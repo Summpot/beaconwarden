@@ -74,10 +74,27 @@ jobs:
 
           # 1) Copy the web-vault static site
           #    (exclude any _worker.js shipped by upstream builds)
-          rsync -a --exclude "_worker.js" "$web_vault_dir"/ "$out_dir"/
+          # Cloudflare Pages has a hard limit of 25 MiB per file.
+          # The upstream web-vault build ships large sourcemaps that can exceed this.
+          # Sourcemaps are optional for runtime behavior, so we exclude them from deploy output.
+          rsync -a \
+            --exclude "_worker.js" \
+            --exclude "*.map" \
+            --exclude "*.map.gz" \
+            --exclude "*.map.br" \
+            "$web_vault_dir"/ "$out_dir"/
 
           # 2) Ensure our proxy worker is used (do not overwrite it during copy)
           cp -p "$worker_js" "$out_dir/_worker.js"
+
+          echo "Checking for files > 25 MiB (Cloudflare Pages per-file limit)..."
+          too_big="$(find "$out_dir" -type f -size +25M -print | head -n 20 || true)"
+          if [ -n "$too_big" ]; then
+            echo "Found files larger than 25 MiB in '$out_dir':" >&2
+            echo "$too_big" >&2
+            echo "Fix: exclude large artifacts (commonly *.map) from the Pages deploy output." >&2
+            exit 1
+          fi
 
       - name: Resolve deploy settings
         id: cfg
